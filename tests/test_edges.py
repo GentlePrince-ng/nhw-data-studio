@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -465,6 +466,161 @@ def main() -> int:
     if not ok:
         fails.append("shape note fired on a genuine dataset: "
                      + quiet.shape_note[:60])
+
+    print("")
+    print("--- one day of timestamps, and a mostly-empty export ---")
+    # A GPS track and an hourly traffic export both cover a single day, so the
+    # span in whole days is zero. That read as "no time axis" and the file lost
+    # its trend chart entirely - the one chart it could support.
+    intraday = pd.DataFrame({
+        "timestamp": pd.Timestamp("2026-03-09 06:00") + pd.to_timedelta(
+            rng.integers(0, 8 * 3600, 900), unit="s"),
+        "speed_kmh": rng.normal(28, 9, 900).round(1),
+        "accuracy_m": rng.integers(3, 40, 900),
+    })
+    prof = pf.build(intraday.to_csv(index=False).encode(), "track.csv")
+    panels = charts.dashboard(prof, limit=6)
+    trends = [q for q in panels if q.kind == "metric_trend" and q.chart is not None]
+    per = [q.note for q in trends]
+    ok = bool(trends) and any("per hour" in n or "per minute" in n for n in per)
+    print(f"  {'PASS' if ok else 'FAIL'}  eight hours of pings still get a "
+          f"trend  ({len(trends)} trend(s): {per[:1]})")
+    if not ok:
+        fails.append("no trend for a single day of timestamps")
+
+    # Same data with an offset. to_period drops the zone, and once the axis
+    # shows hours that decides whether 14:00 means Lagos or UTC.
+    tz = intraday.copy()
+    tz["timestamp"] = tz["timestamp"].dt.tz_localize("Africa/Lagos")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ptz = pf.build(tz.to_csv(index=False).encode(), "track_tz.csv")
+        charts.dashboard(ptz, limit=6)
+    noisy = [str(w.message) for w in caught if "timezone" in str(w.message)]
+    ok = not noisy
+    print(f"  {'PASS' if ok else 'FAIL'}  a tz-aware timestamp column is "
+          f"handled explicitly, not warned about")
+    if not ok:
+        fails.append("timezone dropped with a warning: " + noisy[0][:60])
+
+    # A contacts export carries the whole column list and almost no data. The
+    # emptiness IS the finding, so the page has to say it.
+    wide = {"ContactID": [f"C{i:05d}" for i in range(400)],
+            "FirstName": [f"Name {i}" for i in range(400)]}
+    for i in range(1, 12):
+        wide[f"CustomValue{i}"] = [None] * 400
+    prof = pf.build(pd.DataFrame(wide).to_csv(index=False).encode(), "book.csv")
+    note = prof.shape_note
+    ok = "empty" in note and "11 of 13" in note
+    print(f"  {'PASS' if ok else 'FAIL'}  a mostly-empty export says how many "
+          f"columns are blank  (note={note[:44]!r})")
+    if not ok:
+        fails.append("no note for a mostly-empty export")
+
+    # The header row must survive a sparse table. Requiring the rows beneath it
+    # to be as wide as the header itself demoted the header to data, so the
+    # first record supplied the column names and was then lost.
+    sparse = pd.DataFrame({"ContactID": [f"C{i:04d}" for i in range(50)],
+                           "FirstName": [f"Name {i}" for i in range(50)]})
+    for i in range(1, 12):
+        sparse[f"Custom{i}"] = None
+    prof = pf.build(sparse.to_csv(index=False).encode(), "sparse.csv")
+    ok = prof.rows == 50 and "ContactID" in prof.columns
+    print(f"  {'PASS' if ok else 'FAIL'}  a wide header over a sparse table is "
+          f"kept  ({prof.rows} rows, first col "
+          f"{list(prof.columns)[0] if prof.columns else 'none'!r})")
+    if not ok:
+        fails.append("header row lost on a sparse table")
+
+    # Duplicate headings get a numeric suffix - which has to be checked against
+    # the header too. Two "Notes" columns beside a real "Notes 2" produced two
+    # columns both called "Notes 2", and every per-column check downstream then
+    # raised on a DataFrame where it expected a Series.
+    body = "Notes,Notes,Notes 2,n" + chr(10) + "a,b,c,1" + chr(10) + "d,e,f,2"
+    prof = pf.build(body.encode(), "clash.csv")
+    labels = list(prof.df.columns)
+    ok = len(set(labels)) == len(labels) == 4 and prof.rows == 2
+    print(f"  {'PASS' if ok else 'FAIL'}  a repeated heading beside its own "
+          f"suffix stays unique  ({labels})")
+    if not ok:
+        fails.append("duplicate column labels collided")
+
+    # A rating grid: the response options 1..5 are the columns, and the real
+    # heading sits above them in a merged cell. The header search picks the
+    # first data row because it has more filled cells, so the column names come
+    # out as bare numbers. The tool cannot melt that shape - it has to say so.
+    grid = [",Sub-domain,Statement,Rating format,,,,",
+            ",Stakeholder involvement,P1. The national plan,1,2,3,4,5",
+            ",Costing,P2. The plan is costed,1,2,3,4,5",
+            ",Alignment,P3. Partners align to it,1,2,3,4,5",
+            ",Review,P4. It is reviewed yearly,1,2,3,4,5"]
+    prof = pf.build(chr(10).join(grid).encode(), "grid.csv")
+    labels = [str(c) for c in prof.columns]
+    ok = (prof.rows == 4 and "Sub-domain" in labels
+          and bool(prof.shape_note)
+          and len(charts.dashboard(prof, limit=6)) == 0)
+    print(f"  {'PASS' if ok else 'FAIL'}  a rating grid keeps its header row "
+          f"and is explained  ({prof.rows} rows, {labels[:2]})")
+    if not ok:
+        fails.append("rating grid misread or unexplained")
+
+    # With no header row at all, the first record supplies the names. Nothing
+    # can fix that, so the tool has to name what it sees.
+    head = [",".join(["Adamawa", "NE", "GF", "21", "9.5", "11.5", "7", "8"]),
+            ",".join(["Bauchi", "NE", "GF", "18", "8.5", "10.0", "6", "9"]),
+            ",".join(["Benue", "NC", "GF", "25", "10.5", "12.5", "8", "7"]),
+            ",".join(["Kogi", "NC", "DP", "19", "7.5", "9.5", "5", "6"]),
+            ",".join(["Kwara", "NC", "DP", "22", "9.0", "11.0", "7", "8"])]
+    prof = pf.build(chr(10).join(head).encode(), "headerless.csv")
+    ok = "bare numbers" in prof.shape_note
+    print(f"  {'PASS' if ok else 'FAIL'}  a file with no header row is named as "
+          f"such  (note={prof.shape_note[:34]!r})")
+    if not ok:
+        fails.append("headerless file not recognised")
+
+    # ...but a year-per-column table is a legitimate wide shape that charts.
+    years = pd.DataFrame({"state": ["Kano", "Lagos", "Oyo"] * 10})
+    for y in range(2019, 2026):
+        years[str(y)] = rng.integers(1, 500, 30)
+    prof = pf.build(years.to_csv(index=False).encode(), "years.csv")
+    ok = not prof.shape_note and len(charts.dashboard(prof, limit=4)) > 0
+    print(f"  {'PASS' if ok else 'FAIL'}  a year-per-column table is left alone"
+          f"  (note={prof.shape_note[:30]!r})")
+    if not ok:
+        fails.append("bare-number check fired on year columns")
+
+    # A two-row header: "Pre-Test" merged across three columns, then the three
+    # sub-headings beneath. Reading only the upper row left three columns
+    # called Unnamed; reading only the lower one gave "#Correct" twice with no
+    # way to tell which test it belonged to.
+    two = ["S/N,Name,Pre-Test,,,Post-Test,,",
+           ",,#Correct,#Incorrect,Score,#Correct,#Incorrect,Score",
+           "1,Binta K,12,14,0.46,23,3,0.88",
+           "2,Hassana A,10,16,0.38,21,5,0.81",
+           "3,Halima M,9,17,0.35,21,5,0.81",
+           "4,Fatima B,11,15,0.42,22,4,0.85",
+           "5,Aisha S,13,13,0.50,24,2,0.92"]
+    prof = pf.build(chr(10).join(two).encode(), "twohead.csv")
+    labels = [str(c) for c in prof.columns]
+    ok = (prof.rows == 5 and "Pre-Test #Correct" in labels
+          and "Post-Test Score" in labels and "Name" in labels)
+    print(f"  {'PASS' if ok else 'FAIL'}  a merged two-row header is folded "
+          f"into one  ({prof.rows} rows, {labels[2:4]})")
+    if not ok:
+        fails.append("two-row header not merged")
+
+    # A wide table whose row-label column has no heading. Dropping it as
+    # "Unnamed" left years as columns and nothing to name them against.
+    wide = [",2015,2016,2017,2018",
+            "Total population,186083442,192038112,198183332,204525199",
+            "Total funding,41200000,43800000,44100000,46900000",
+            "Gap,144883442,148238112,154083332,157625199"]
+    prof = pf.build(chr(10).join(wide).encode(), "wide.csv")
+    ok = prof.rows == 3 and len(prof.columns) == 5
+    print(f"  {'PASS' if ok else 'FAIL'}  a blank-headed label column is kept"
+          f"  ({prof.rows} rows x {len(prof.columns)} cols)")
+    if not ok:
+        fails.append("row-label column dropped from a wide table")
 
     print("\n--- size ---")
     n = 100_000

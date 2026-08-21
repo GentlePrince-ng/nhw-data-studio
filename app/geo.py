@@ -207,9 +207,13 @@ def summarise(df: pd.DataFrame, place_col: str, value_col: str | None = None,
         feats.append({"type": "Feature", "geometry": f["geometry"],
                       "properties": props})
 
-    unmatched = sorted(set(grouped["label"][~grouped["key"].isin(hit_keys)]))
-    unused = sorted(f["properties"]["name"] for f in feats
-                    if f["properties"]["records"] == 0)
+    # str() and dropna() both matter: a place column with blanks mixes NaN with
+    # strings, and sorted() then raises rather than listing what did not match.
+    missed = grouped["label"][~grouped["key"].isin(hit_keys)].dropna()
+    unmatched = sorted({str(x) for x in missed})
+    unused = sorted(str(f["properties"]["name"]) for f in feats
+                    if f["properties"]["records"] == 0
+                    and f["properties"]["name"] is not None)
     grouped["label"] = [canon_name.get(k, lbl)
                         for k, lbl in zip(grouped["key"], grouped["label"])]
     grouped["value"] = grouped["value"].round(2)

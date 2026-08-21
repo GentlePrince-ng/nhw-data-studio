@@ -406,10 +406,22 @@ def by_dimension(df: pd.DataFrame, m: Measure, dim: str,
 
 
 # ═══ time ═══════════════════════════════════════════════════════════════════
-GRAINS = {"D": ("day", "D"), "W": ("week", "W"), "MS": ("month", "M")}
+GRAINS = {"min": ("minute", "min"), "h": ("hour", "h"),
+          "D": ("day", "D"), "W": ("week", "W"), "MS": ("month", "M")}
 
 
-def grain_for(span_days: int) -> str:
+def grain_for(span_days: int, span_seconds: int | None = None) -> str:
+    """The period to bucket by. Sub-day spans get sub-day buckets.
+
+    Passing only span_days keeps the old behaviour, so callers that never see
+    intraday data are unaffected.
+    """
+    if span_days < 1 and span_seconds is not None:
+        if span_seconds <= 4 * 3600:
+            return "min"
+        return "h"
+    if span_days <= 3:
+        return "h"
     if span_days <= 62:
         return "D"
     return "W" if span_days <= 400 else "MS"
@@ -419,12 +431,18 @@ def over_time(df: pd.DataFrame, m: Measure, date: str, prof: pf.Profile,
               freq: str | None = None) -> tuple:
     """(frame, grain label). The measure aggregated per period."""
     s = pd.to_datetime(df[date], errors="coerce")
+    # Kobo and GA4 exports carry a UTC offset. Bucketing a tz-aware column
+    # dropped the zone with a warning nobody saw; now that an hourly grain
+    # exists, that decided whether "14:00" meant Lagos or UTC. Keep the wall
+    # clock the export was written in, which is the one the reader recognises.
+    if getattr(s.dtype, "tz", None) is not None:
+        s = s.dt.tz_localize(None)
     d = pd.DataFrame({"_d": s, "_v": apply(df, m, prof)}).dropna(subset=["_d"])
     d = d.dropna(subset=["_v"])
     if d.empty:
         return pd.DataFrame(columns=["Period", m.verb]), "period"
-    span = (d["_d"].max() - d["_d"].min()).days
-    freq = freq or grain_for(span)
+    gap = d["_d"].max() - d["_d"].min()
+    freq = freq or grain_for(gap.days, int(gap.total_seconds()))
     label, code = GRAINS[freq]
     d["Period"] = d["_d"].dt.to_period(code).dt.to_timestamp()
     g = d.groupby("Period")["_v"].agg(m.pagg).reset_index()

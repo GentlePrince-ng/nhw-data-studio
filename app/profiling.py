@@ -173,10 +173,13 @@ class Profile:
 
     def best_date(self):
         """The date column a trend should use: most complete, then most spread."""
-        dates = [c for c in self.by_role(DATETIME) if c.stats.get("span_days", 0) > 0]
+        dates = [c for c in self.by_role(DATETIME)
+                 if c.stats.get("span_days", 0) > 0
+                 or c.stats.get("span_seconds", 0) >= 900]
         if not dates:
             return None
-        return max(dates, key=lambda c: (c.filled, c.stats.get("span_days", 0))).name
+        return max(dates, key=lambda c: (c.filled,
+                                         c.stats.get("span_seconds", 0))).name
 
     def best_geo(self):
         """A state column beats an LGA column: fewer levels, reads better."""
@@ -317,31 +320,95 @@ def find_header(raw: pd.DataFrame, look: int = 15) -> int:
         return 0
     block = raw.head(look)
     filled = block.notna().sum(axis=1)
-    best, best_score = 0, -1.0
+    best, best_score, scored = 0, -1.0, {}
     for r in range(min(look, len(block))):
+        # Only judge a row that has rows beneath it to be judged against. At
+        # the bottom of the sampled block there is nothing below, so the
+        # type-contrast terms all collapse to zero and the last row scored
+        # highest by default — which is exactly what it did.
+        if len(block) - (r + 1) < 3 and r > 0:
+            break
         vals = block.iloc[r].dropna()
         n = len(vals)
         if n < 2:
             continue
         labels = [str(v).strip() for v in vals]
+        # A year is a name, not a measurement. A funding table headed
+        # 2015..2021 was rejected as "all numeric", so the first row of figures
+        # became the column names and every heading read like 186083442.0.
         wordy = sum(1 for v in labels
-                    if not str(v).replace(".", "", 1).lstrip("-").isdigit())
+                    if not str(v).replace(".", "", 1).lstrip("-").isdigit()
+                    or 1900 <= _as_year(v) <= 2100)
         # An all-numeric row is data, never a header. Without this, a sheet
         # whose real header repeats a label ("x", "x", "y") had that row
         # rejected and the first row of numbers promoted instead, quietly
         # eating a record.
         if wordy == 0:
             continue
-        # Rows below must carry data.
+        # Rows below must carry data — but only *some* data. Requiring them to
+        # be as wide as the header rejected the header of any sparse export: a
+        # contacts file with 13 columns and 2 filled per row lost its header
+        # row, which then became the first record's names and cost a record.
         below = filled.iloc[r + 1: r + 6]
-        if below.empty or float(below.mean()) < max(2.0, n * 0.4):
+        if below.empty or int(below.max()) < 2:
             continue
         # Repeated labels are a smell, not a disqualification: real trackers do
         # ship two columns called "Notes".
+        # Type contrast, column by column. A header is text sitting on top of
+        # numbers; a row of data matches the type of its own column. Counting
+        # both ways is what separates them, and it does not care how wide the
+        # row is — which width did, so a header split across two merged rows
+        # always lost to the first full row of data beneath it.
+        switch = datalike = 0
+        for pos in range(block.shape[1]):
+            cell = block.iat[r, pos]
+            if pd.isna(cell):
+                continue
+            under = block.iloc[r + 1: r + 8, pos].dropna()
+            if len(under) < 2:
+                continue
+            numbers_below = sum(_numberish(v) for v in under) >= 0.6 * len(under)
+            if not numbers_below:
+                continue
+            if _numberish(cell):
+                datalike += 1        # a number over numbers: this is a record
+            else:
+                switch += 1          # a name over numbers: this is a heading
+        # An email address or a link is a value, never a column name. On an
+        # all-text table — a Zoom attendee report — the type contrast above is
+        # silent, so the widest row of attendees won and every column came out
+        # prefixed with somebody's address. Length is deliberately not a signal
+        # here: a Kobo header is a full question, sixty characters and more.
+        if any(re.match(r"\S+@\S+\.\S+$", v) or v.lower().startswith(
+                ("http://", "https://", "www.")) for v in labels):
+            continue
         dupes = len(labels) - len(set(labels))
-        score = n + wordy * 0.5 - dupes - r * 0.01   # earlier row wins a tie
+        # A quarter-point, not a whole one. At -1 a single repeated heading was
+        # enough for the first row of data to outscore the real header on a
+        # narrow table, because a text-heavy data row scores nearly as well.
+        # As a *share* of the columns that could be judged, not a raw count: a
+        # count rewarded rows far down the sheet where the data thins out and
+        # only two columns can be judged at all, and one of those outscored the
+        # real header. Capped weight, so one judgeable column cannot decide it.
+        judged = switch + datalike
+        contrast = ((switch - datalike) / judged * min(judged, 3)) if judged else 0
+        # Width is a tie-breaker now, not the main term. When it led, any row
+        # of data outscored a header with merged or empty cells above it.
+        score = (n * 0.1 + wordy * 0.5 + contrast
+                 - dupes * 0.25 - r * 0.01)         # early row wins ties
+        scored[r] = (score, contrast)
         if score > best_score:
             best, best_score = r, score
+    # Two-row headers: "Pre-Test" merged across three columns, then "#Correct /
+    # #Incorrect / Score" beneath. Both rows score as headers and the upper one
+    # can win by a hair, which loses the sub-headings and leaves three columns
+    # called Unnamed. Take the lower row — _merge_header folds the group name
+    # back in, giving "Pre-Test #Correct".
+    while best + 1 in scored:
+        nxt, nxt_contrast = scored[best + 1]
+        if nxt_contrast <= 0 or nxt < best_score - 1.0:
+            break
+        best = best + 1
     return best
 
 
@@ -372,24 +439,63 @@ def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
     return _apply_header(raw)
 
 
+def _merge_header(raw: pd.DataFrame, h: int) -> list:
+    """The header row, with a merged group header above it folded in.
+
+    Excel headers are routinely two rows: "Pre-Test" merged across three
+    columns, then "#Correct / #Incorrect / Score" beneath. Reading only the
+    lower row gave "#Correct" and "#Correct 2" — indistinguishable — and left
+    the S/N and Name columns nameless, so they were dropped as Unnamed and the
+    file lost the one column that said whose score it was.
+
+    A merged cell reads as a value followed by blanks, so the row above is
+    forward-filled. A one-cell title is not a group header and is ignored,
+    otherwise every column would be prefixed with the report's name.
+    """
+    row = list(raw.iloc[h])
+    if h == 0:
+        return row
+    above = raw.iloc[h - 1]
+    if above.notna().sum() < 2 or above.notna().sum() >= raw.iloc[h].notna().sum():
+        return row
+    spread = above.ffill()
+    out = []
+    for i, v in enumerate(row):
+        top = spread.iloc[i] if i < len(spread) else None
+        if pd.isna(v) or not str(v).strip() or str(v).strip().lower() == "nan":
+            out.append(top)                       # blank below a name: use it
+        elif pd.notna(top) and str(top).strip() and str(top).strip() != str(v).strip():
+            out.append(f"{str(top).strip()} {str(v).strip()}")
+        else:
+            out.append(v)
+    return out
+
+
 def _apply_header(raw: pd.DataFrame) -> pd.DataFrame:
     """Promote the detected header row and drop everything above it."""
     if raw.empty:
         return raw
     h = find_header(raw)
     frame = raw.iloc[h + 1:].reset_index(drop=True)
+    row = _merge_header(raw, h)
     names, seen = [], {}
-    for i, v in enumerate(raw.iloc[h].tolist()):
+    for i, v in enumerate(row):
         label = str(v).strip() if pd.notna(v) else f"Unnamed: {i}"
         if not label or label.lower() == "nan":
             label = f"Unnamed: {i}"
         # Duplicate headings get a suffix rather than being silently dropped:
         # a tracker with two "Notes" columns still has two columns of notes.
         if label in seen:
-            seen[label] += 1
-            label = f"{label} {seen[label]}"
-        else:
-            seen[label] = 1
+            # The suffix has to be checked too. A form export with two "Notes"
+            # columns *and* a real "Notes 2" produced two columns both called
+            # "Notes 2", and from then on frame[col] returned a DataFrame:
+            # every per-column check downstream raised on .dtype.
+            base, n = label, seen[label]
+            while label in seen:
+                n += 1
+                label = f"{base} {n}"
+            seen[base] = n
+        seen[label] = seen.get(label, 1)
         names.append(label)
     frame.columns = names
     # Reading with header=None makes pandas infer every column as object,
@@ -761,8 +867,13 @@ def classify(df: pd.DataFrame):
         if role == DATETIME:
             good = pd.to_datetime(df[name], errors="coerce").dropna()
             if not good.empty:
+                gap = good.max() - good.min()
                 stats = {"start": good.min(), "end": good.max(),
-                         "span_days": int((good.max() - good.min()).days)}
+                         "span_days": int(gap.days),
+                         # A day of GPS pings or a day of hourly traffic has a
+                         # span of 0 *days*, which read as "no time axis" and
+                         # cost the file its trend chart entirely.
+                         "span_seconds": int(gap.total_seconds())}
         if role in (CATEGORICAL, BINARY, GEO):
             vc = s.value_counts(dropna=True)
             stats["top"] = str(vc.index[0]) if len(vc) else ""
@@ -1002,6 +1113,29 @@ def looks_like_xlsform(sheets: list, columns) -> bool:
                                                      "relevant", "appearance"})
 
 
+def _numberish(v) -> bool:
+    """Would this cell read as a number? Used to tell a heading from a value."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return True
+    try:
+        float(str(v).replace(",", "").strip())
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _as_year(label) -> int:
+    """The label as a year if it plausibly is one, else 0.
+
+    A wide table with 2019..2025 as columns is a legitimate shape that charts
+    fine, so it must not be caught by the bare-number check.
+    """
+    try:
+        return int(float(str(label).strip().split(" ")[0]))
+    except (TypeError, ValueError):
+        return 0
+
+
 def describe_shape(prof, sheets: list) -> str:
     """A sentence explaining why a file has nothing to analyse, or "".
 
@@ -1020,14 +1154,47 @@ def describe_shape(prof, sheets: list) -> str:
         return ("No table was found in this sheet. It may be a pivot-style "
                 "layout with values scattered across cells, or a cover page. "
                 "The tool needs one row per record and one column per field.")
+    # Column names that are bare numbers are cell values that got promoted:
+    # a rating grid where the response options 1..5 are the columns and the
+    # real heading row sits above them, merged. The tool cannot melt that, and
+    # saying "pivot-style" is far better than charting "Average 3.0".
+    numeric_names = [c for c in prof.columns.values()
+                     if re.fullmatch(r"[-+]?\d+(\.\d+)?( \d+)?",
+                                     str(c.name).strip())
+                     and not (1900 <= _as_year(c.name) <= 2100)]
+    if len(numeric_names) >= 3 and len(numeric_names) >= 0.4 * len(prof.columns):
+        return (f"{len(numeric_names)} of {len(prof.columns)} column names are "
+                "bare numbers, which means a row of values was read as the "
+                "heading row. This is usually a rating grid or a pivot-style "
+                "layout, where the answer options are the columns and the real "
+                "heading sits above them in a merged cell. Pick a different "
+                "sheet, or reshape it to one row per record before uploading.")
+    blank = [c for c in prof.columns.values() if c.role == EMPTY]
+    if len(blank) >= max(4, 0.6 * len(prof.columns)):
+        return (f"**{len(blank)} of {len(prof.columns)} columns are completely "
+                "empty.** That is the finding here: the export carries the "
+                "full column list but almost none of it was filled in. The "
+                "column map lists which ones.")
     if not usable:
         return ("This sheet has no analysable columns — every column is empty, "
                 "holds a single repeated value, or is free text. It may be a "
                 "cover page, a notes sheet, or a report preamble.")
+    if len(prof.columns) <= 2 and prof.rows < 15:
+        return ("This looks like a preamble rather than a data table: a couple "
+                "of columns and a handful of rows. If the export has the table "
+                "on another sheet, pick it in the sidebar.")
+    # Countable means the charts would actually use it: enough levels to
+    # compare, and enough rows filled in. A stray 13-row block in the corner of
+    # an attendee sheet is not a dimension, and counting it as one kept the
+    # page silent about a file with nothing to aggregate.
     counted = [c for c in usable
                if c.role in (CATEGORICAL, BINARY, GEO) and c.filled
-               and c.unique < max(2, c.filled * 0.9)]
-    if not counted and not [c for c in usable if c.role in (NUMERIC, DATETIME)]:
+               and c.unique < max(2, c.filled * 0.9)
+               and c.unique <= MAX_CAT_LEVELS
+               and c.filled >= max(5, 0.25 * prof.rows)]
+    numbers = [c for c in usable if c.role == NUMERIC]
+    if (prof.rows < 30 and not counted
+            and not [c for c in usable if c.role in (NUMERIC, DATETIME)]):
         # A written document laid out in a grid: an outline, a theory of change,
         # a gaps-and-questions table. Every cell is distinct prose, so there is
         # nothing to count and nothing to total. Charting it would produce a row
@@ -1038,10 +1205,14 @@ def describe_shape(prof, sheets: list) -> str:
                 "than a dataset. There is nothing to count or total. The "
                 "**Brief** can still summarise it, and the table below shows it "
                 "in full.")
-    if len(prof.columns) <= 2 and prof.rows < 15:
-        return ("This looks like a preamble rather than a data table: a couple "
-                "of columns and a handful of rows. If the export has the table "
-                "on another sheet, pick it in the sidebar.")
+    if not counted and not numbers:
+        # A list where every row is its own thing: a collector list, a
+        # schedule, an attendee sheet. A date column does not rescue it — a
+        # trend through seven distinct rows is not a trend.
+        return (f"{prof.rows:,} rows, and no column with numbers to total or "
+                "repeated categories to count — this is a list rather than a "
+                "dataset. The table below shows it in full, and the **Brief** "
+                "can still read it.")
     return ""
 
 
@@ -1065,7 +1236,12 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
     # nobody filled in is a finding about the form, and dropping it here would
     # make it invisible on the column map where someone can act on it.
     raw = raw.dropna(axis=0, how="all")
-    keep = [c for c in raw.columns if not re.match(r"^Unnamed: \d+$", str(c))]
+    # Only drop an unnamed column if it is also empty. A wide table's row-label
+    # column often has a blank heading, and dropping it took away the one
+    # dimension the file had — leaving years as columns and nothing to name.
+    keep = [c for c in raw.columns
+            if not re.match(r"^Unnamed: \d+$", str(c))
+            or raw[c].notna().any()]
     raw = raw[keep]
     truncated = 0
     if row_cap and len(raw) > row_cap:

@@ -482,10 +482,11 @@ def measure_trend(p: pf.Profile, m, date: str | None = None,
     frame, grain = metrics.over_time(p.df, m, date, p, freq)
     if len(frame) < 2:
         return None
-    fmt = {"D": "%d %b", "W": "%d %b", "MS": "%b %y"}[
-        freq or metrics.grain_for(
-            (pd.to_datetime(p.df[date], errors="coerce").max()
-             - pd.to_datetime(p.df[date], errors="coerce").min()).days)]
+    # Take the axis format from the grain over_time actually used, rather than
+    # recomputing the span here: two answers to the same question drift, and a
+    # new grain used to raise a KeyError on this line.
+    fmt = {"minute": "%H:%M", "hour": "%H:%M", "day": "%d %b",
+           "week": "%d %b", "month": "%b %y"}.get(grain, "%d %b")
     ch = theme.trend(frame, "Period", m.verb, height=230, y_title=m.verb,
                      x_format=fmt)
     out = frame.copy()
