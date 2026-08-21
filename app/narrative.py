@@ -51,15 +51,28 @@ answerable with this dataset or with a named additional source."""
 
 
 def available() -> tuple[bool, str]:
-    """(usable, why not). Checked before the panel offers to run anything."""
+    """(usable, why not). Checked before the panel offers to run anything.
+
+    The two failure modes are named separately and each says what to do *where*.
+    They look identical from the outside — the page reports itself unavailable —
+    and the fix is completely different: a missing key is a secret to add, a
+    missing library is a redeploy. Conflating them cost an afternoon once, when a
+    key was correctly added to a deployment whose requirements.txt did not list
+    `anthropic` at all.
+    """
     try:
         import anthropic  # noqa: F401
     except ImportError:
-        return False, "The `anthropic` package is not installed (pip install anthropic)."
+        return False, (
+            "The `anthropic` package is not installed, so the key cannot be "
+            "used even if it is set. Locally: `pip install \"anthropic>=1\"`. "
+            "On a deployment you cannot install by hand — add `anthropic>=1,<2` "
+            "to requirements.txt, push, and let it rebuild.")
     if not (os.environ.get("ANTHROPIC_API_KEY")
             or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        return False, ("No API key found. Set ANTHROPIC_API_KEY in the "
-                       "environment or in .streamlit/secrets.toml.")
+        return False, ("The package is installed but no API key was found. Set "
+                       "`ANTHROPIC_API_KEY` in the app's secrets (deployed) or "
+                       "in the environment / .streamlit/secrets.toml (local).")
     return True, ""
 
 
