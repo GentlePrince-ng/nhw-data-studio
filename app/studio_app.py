@@ -22,7 +22,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import charts, geo, insights, narrative, profiling as pf, report, theme  # noqa: E402
+from app import charts, gate, geo, insights, narrative, profiling as pf, report, theme  # noqa: E402
 
 ROW_CAP = 300_000        # far above the 10k target; guards a rogue 5m-row export
 PAGES = ["Overview", "Findings", "Data health", "Explore", "Written brief"]
@@ -521,6 +521,10 @@ this browser session and goes when you close the tab.
 
 # ═══ main ═══════════════════════════════════════════════════════════════════
 def main():
+    # Access first: nothing about the data, not even the uploader, before the
+    # gate is satisfied. See app/gate.py for why it fails closed.
+    if not gate.require():
+        return
     src = sidebar_source()
     if src is None:
         welcome()

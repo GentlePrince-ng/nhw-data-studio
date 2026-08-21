@@ -123,6 +123,24 @@ Joining a spreadsheet to a boundary file is where a map goes wrong, so:
 - **Explore** — pick a column and something to break it down by; the chart type follows the pair of roles (two numerics → scatter with the correlation stated; numeric by category → group means with small groups flagged; date by category → lines; two categories → row-percentaged crosstab).
 - **Written brief** — optional. Sends the *aggregates* — column map, finding sentences, small summary tables — to Claude and asks for a draft brief in four sections. No row of data leaves the machine, and the model is instructed to use no number it was not given. Needs `pip install "anthropic>=1"` and a key in `ANTHROPIC_API_KEY` or `.streamlit/secrets.toml` (which the app copies into the environment itself, because Streamlit does not). Everything else works without it, and the page says which of the two is missing.
 
+## Deploying it
+
+Streamlit Community Cloud has **no private apps** any more — that moved to
+Snowflake — so a deployed URL is reachable by anyone who has it. Since this tool
+takes uploads of health data, it ships with an access gate that **fails closed**:
+
+- Set `ACCESS_CODE` in the app's secrets (share.streamlit.io → *Settings* →
+  *Secrets*) and everyone needs that code once per browser session. Change the
+  code to revoke access from everyone at once. `ACCESS_CODES = "a,b,c"` accepts
+  several.
+- With no code configured the app admits **nobody** and prints the fix for the
+  owner. That is deliberate: open-by-default with a warning banner puts a real
+  dataset one forgotten setting away from a public page.
+- Running it on your own machine, set `NHW_STUDIO_OPEN=1` and there is no gate.
+
+A shared code says *someone was given this*, not *who*. If per-person access
+matters, the hashed-roster pattern from the NHW dashboard belongs here instead.
+
 ## Size
 
 Built for the 10,000-row exports this was commissioned for, comfortable to a few
