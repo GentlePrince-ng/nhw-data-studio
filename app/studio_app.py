@@ -85,8 +85,18 @@ def sidebar_source():
     sheet = None
     names = _sheets(key, data, up.name)
     if len(names) > 1:
-        sheet = st.sidebar.selectbox("Sheet", names, help=f"{len(names)} sheets "
-                                    "in this workbook")
+        # Combined first, and the default. A workbook with one sheet per week is
+        # a single dataset kept in twelve pieces, and analysing one piece at a
+        # time is the wrong answer to every question anybody has about it.
+        options = [pf.ALL_SHEETS] + names
+        sheet = st.sidebar.selectbox(
+            "Sheet", options,
+            format_func=lambda v: (f"All {len(names)} sheets combined"
+                                   if v == pf.ALL_SHEETS else v),
+            help=f"{len(names)} sheets in this workbook. Combined stacks every "
+                 "sheet that shares the same columns and adds a Sheet column, "
+                 "so a weekly tracker becomes one dataset with a week to plot "
+                 "against.")
     elif names:
         sheet = names[0]
     return key, data, up.name, sheet
@@ -646,6 +656,10 @@ def main():
         f"**{prof.rows:,}** records · **{len(prof.columns)}** columns"
         + (f" · {base.truncated:,} rows past the cap were not read"
            if base.truncated else ""))
+    if base.sheets_used:
+        st.sidebar.caption("Combined: " + ", ".join(base.sheets_used))
+    for name_, why in base.sheets_skipped:
+        st.sidebar.caption(f"Left out — **{name_}**: {why}")
     st.sidebar.caption("Nothing is stored. Close the tab and it is gone.")
 
     {"Overview": page_overview, "Findings": page_findings,

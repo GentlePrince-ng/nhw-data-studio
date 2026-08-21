@@ -37,7 +37,19 @@ SUM_WORDS = ("count", "total", "number", "num", "visits", "attendance",
              "attended", "doses", "cases", "deaths", "births", "tests",
              "referrals", "sessions", "reached", "trained", "screened",
              "distributed", "stock", "quantity", "qty", "amount", "cost",
-             "budget", "spend", "revenue", "population", "beneficiaries")
+             "budget", "spend", "revenue", "population", "beneficiaries",
+             # Engagement metrics are counts of events, and a campaign report
+             # wants their totals. A tracker came out with retweets summed but
+             # likes and views averaged — same kind of number, different
+             # treatment, purely because of where the integer cut-off fell.
+             "views", "impressions", "reach", "likes", "retweets", "shares",
+             "comments", "clicks", "engagement", "engagements", "followers",
+             "subscribers", "plays", "watch", "downloads", "opens", "sends",
+             "bookmarks", "quotes", "saves", "replies", "mentions", "posts")
+
+# A name that opens by counting something is a total, whatever follows.
+COUNT_PREFIXES = ("no of", "number of", "count of", "total", "sum of", "# of",
+                  "#", "no. of", "nos of")
 # Fragments that imply a level or a rate, where a total is nonsense.
 MEAN_WORDS = ("rate", "ratio", "pct", "percent", "percentage", "share",
               "proportion", "average", "mean", "median", "score", "index",
@@ -128,8 +140,11 @@ def share_measures(prof: pf.Profile, limit: int = 12) -> list:
 
 def _agg_for(name: str, stats: dict) -> tuple[str, str]:
     """(aggregation, why). Name first, then the shape of the values."""
-    low = re.sub(r"[^a-z ]+", " ", str(name).lower())
+    low = re.sub(r"[^a-z# ]+", " ", str(name).lower()).strip()
+    low = re.sub(r"\s+", " ", low)
     tokens = set(low.split())
+    if low.startswith(COUNT_PREFIXES):
+        return "sum", "totalled: the name opens by counting something"
     if tokens & set(MEAN_WORDS) or any(w in low for w in MEAN_WORDS):
         return "mean", "averaged: the name reads as a rate, level or duration"
     if tokens & set(SUM_WORDS) or any(w in low for w in SUM_WORDS):
@@ -234,6 +249,40 @@ def spread(frame: pd.DataFrame, col: str) -> float:
     if len(v) < 2 or not float(abs(v.mean())):
         return 0.0
     return float((v.max() - v.min()) / abs(v.mean()))
+
+
+SEQ_WORDS = ("week", "wk", "month", "wave", "round", "quarter", "q", "phase",
+             "term", "period", "cycle", "year", "day", "visit", "batch")
+
+
+def ordinal_order(values) -> list:
+    """Put Week 1, Week 2 … Week 11 in order, or return [] if they are not a run.
+
+    A weekly tracker keeps its time axis in the sheet names, so after combining
+    there is a column of "Week 1".."Week 11" and no date anywhere in the file.
+    Sorted as text that reads Week 1, Week 10, Week 11, Week 2 — and plotted as
+    a bar chart sorted by size it stops being a time axis at all. Recognising
+    the run is what turns it back into a trend.
+    """
+    labels = [str(v).strip() for v in pd.unique(pd.Series(values).dropna())]
+    if len(labels) < 3:
+        return []
+    parsed, stray = [], 0
+    for lab in labels:
+        m = re.match(r"^\s*([A-Za-z]{1,10})?\s*[-_ ]?(\d{1,4})\s*$", lab)
+        word = (m.group(1) or "").lower() if m else ""
+        if not m or (word and word not in SEQ_WORDS):
+            stray += 1
+            continue
+        parsed.append((int(m.group(2)), lab))
+    # A minority of labels outside the run is normal and must not cancel it: the
+    # campaign tracker has Week 1..11 and a "Videos" sheet, and requiring every
+    # label to fit meant eleven weeks of a campaign had no time axis because of
+    # one extra tab. The strays keep their bars; they are just not on the line.
+    if len(parsed) < 3 or len(parsed) < 0.6 * len(labels):
+        return []
+    parsed.sort()
+    return [lab for _, lab in parsed]
 
 
 def _series(df: pd.DataFrame, m: Measure) -> pd.Series:

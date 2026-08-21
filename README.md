@@ -72,6 +72,12 @@ chart, the column map, and a provenance sheet.
 | A column the field team stopped filling in | Flagged with the filled count, so a percentage is not read against the whole sample |
 | Collection that stopped for a fortnight | Gaps in the date coverage reported, so per-week averages are not read as continuous |
 | A phone number column Excel turned into a number | Read as an identifier, kept out of the statistics |
+| A title and blank rows above the table | The header row is found rather than assumed — without this a campaign tracker read as **one column and 71 rows** |
+| One sheet per week, plus a Summary | Sheets sharing a layout are stacked into one dataset with a `Sheet` column; a pre-aggregated summary is left out and said so, because stacking it double counts |
+| `Week 1 … Week 11` and no date column anywhere | Recognised as an ordered run and plotted as a trend, instead of a bar chart sorted by size |
+| Whole survey questions as column names | Titles use a short form; the full question stays in the caption |
+| GPS latitude/longitude/altitude columns | Never treated as measures — "average geo-point latitude" is not a metric |
+| 22 yes/no attitude questions and nothing to total | Each becomes a **% yes** measure, which is what a perception survey actually reports |
 
 Percentages are always stated against the number of records that answered the
 question concerned, and that denominator is printed under the chart.

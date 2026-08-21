@@ -153,6 +153,83 @@ def kobo_checks() -> None:
        max(titles, key=len)[:110] if titles else "none")
 
 
+def tracker_shaped() -> bytes:
+    """A hand-maintained workbook: title rows, spacer column, a sheet per week.
+
+    The shape of the campaign tracker that read as ONE column and 71 rows
+    before header detection existed.
+    """
+    rng = np.random.default_rng(9)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        for wk in range(1, 5):
+            n = 20
+            body = pd.DataFrame({
+                "SN": [1] + [None] * (n - 1),
+                "Content": [None] * n,
+                "Links to posts": [f"https://x.test/{wk}/{i}" for i in range(n)],
+                "Author": rng.choice(["NHW", "Ugo", "Anto"], n),
+                "Channel ": rng.choice(["Twitter", "Facebook"], n),
+                "No of Views": rng.integers(50, 25000, n),
+                "No of Retweets": rng.integers(0, 40, n),
+                "No of Likes": rng.integers(0, 3000, n),
+            })
+            # Four junk rows above the header, as a person would leave them.
+            head = pd.DataFrame([["Campaign Tracker"] + [None] * 7,
+                                 [None] * 8, [None] * 8, [None] * 8],
+                                columns=range(8))
+            head.to_excel(xw, sheet_name=f"Week {wk}", index=False, header=False)
+            body.to_excel(xw, sheet_name=f"Week {wk}", index=False, startrow=4)
+        # A pre-aggregated summary that must NOT be stacked with the raw rows.
+        pd.DataFrame({"Week": [f"Week {i}" for i in range(1, 5)],
+                      "No of Views": [100, 200, 300, 400]}
+                     ).to_excel(xw, sheet_name="Summary", index=False, startrow=4)
+    return buf.getvalue()
+
+
+def tracker_checks() -> None:
+    from app import metrics
+
+    def ck(label, cond, detail=""):
+        print(("  PASS  " if cond else "  FAIL  ") + label
+              + (f"  {detail}" if detail and not cond else ""))
+        if not cond:
+            fails.append(label)
+
+    data = tracker_shaped()
+    one = pf.build(data, "tracker.xlsx", sheet="Week 1")
+    ck("a header below title rows is found",
+       "No of Views" in one.columns and one.rows == 20,
+       f"{one.rows} rows, cols {list(one.columns)[:4]}")
+
+    allp = pf.build(data, "tracker.xlsx", sheet=pf.ALL_SHEETS)
+    ck("sheets sharing a layout are stacked", allp.rows == 80, f"{allp.rows} rows")
+    ck("the sheet name becomes a column", "Sheet" in allp.columns)
+    ck("a pre-aggregated summary sheet is left out",
+       "Summary" not in allp.sheets_used and any(
+           n == "Summary" for n, _ in allp.sheets_skipped),
+       f"used {allp.sheets_used}")
+    aggs = {m.col: m.agg for m in metrics.measures(allp, limit=6)}
+    ck("engagement counts are totalled, not averaged",
+       aggs.get("No of Views") == "sum" and aggs.get("No of Likes") == "sum",
+       str(aggs))
+    ck("the sheet column is offered as a dimension",
+       "Sheet" in [d.name for d in metrics.dimensions(allp)])
+
+    order = metrics.ordinal_order(allp.df["Sheet"])
+    ck("Week 1..4 is recognised as an ordered run, not text",
+       order == ["Week 1", "Week 2", "Week 3", "Week 4"], str(order))
+    ck("a run with one stray label still counts",
+       metrics.ordinal_order(pd.Series(
+           ["Week 1", "Week 2", "Week 3", "Week 11", "Videos"]))
+       == ["Week 1", "Week 2", "Week 3", "Week 11"])
+    ck("unordered labels are not faked into a sequence",
+       metrics.ordinal_order(pd.Series(["Kano", "Lagos", "Borno"])) == [])
+    kinds = {q.kind for q in charts.dashboard(allp, limit=8)}
+    ck("a file with no date column still gets a trend",
+       "sequence_trend" in kinds, str(kinds))
+
+
 def main() -> int:
     rng = np.random.default_rng(11)
     print("\n--- awkward uploads ---")
@@ -223,6 +300,9 @@ def main() -> int:
 
     print("\n--- kobo-shaped survey (what the real CBPS file taught us) ---")
     kobo_checks()
+
+    print("\n--- hand-maintained tracker (title rows, one sheet per week) ---")
+    tracker_checks()
 
     print("\n--- size ---")
     n = 100_000

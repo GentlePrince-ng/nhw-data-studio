@@ -568,10 +568,19 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
     place = p.best_geo()
     panels = []
 
+    seq_dim = next((d.name for d in dims
+                    if len(metrics.ordinal_order(p.df[d.name])) >= 3), None)
     for m in ms[:3]:
         if date:
             panels.append(measure_trend(p, m, date))
+        elif seq_dim:
+            # No date anywhere, but an ordered run of labels is a time axis.
+            panels.append(sequence_trend(p, m, seq_dim))
         for dim in dims[:2]:
+            # The sequence line already shows this dimension; a bar of the same
+            # numbers beside it is padding, not a second view.
+            if dim.name == seq_dim and not date:
+                continue
             panels.append(measure_by(p, m, dim.name, min_spread=0.12))
         if date and dims:
             panels.append(change_by(p, m, dims[0].name, date))
@@ -582,3 +591,35 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
         if len([x for x in panels if x]) >= limit:
             break
     return [x for x in panels if x][:limit]
+
+def sequence_trend(p: pf.Profile, m, dim: str) -> Panel | None:
+    """A measure across an ordered run of labels — Week 1..11, Wave 1..4.
+
+    The trend chart for a file with no date column, which is most
+    hand-maintained trackers. Without it a weekly campaign has no time axis at
+    all, and the only view of eleven weeks is a bar chart sorted by size.
+    """
+    from . import metrics
+    order = metrics.ordinal_order(p.df[dim])
+    if len(order) < 3:
+        return None
+    frame = metrics.by_dimension(p.df, m, dim, p, top=200)
+    if frame.empty:
+        return None
+    frame = frame[frame["Category"].isin(order)]
+    if len(frame) < 3:
+        return None
+    ch = alt.Chart(frame).mark_line(
+        strokeWidth=2, point=alt.OverlayMarkDef(size=45, filled=True),
+        color=theme.GREEN_DEEP,
+    ).encode(
+        x=alt.X("Category:N", sort=order, title=None,
+                axis=alt.Axis(labelAngle=-35)),
+        y=alt.Y(f"{m.verb}:Q", title=m.verb, scale=alt.Scale(zero=True)),
+        tooltip=[alt.Tooltip("Category:N", title=p.short(dim)),
+                 alt.Tooltip(f"{m.verb}:Q", format=m.fmt()),
+                 alt.Tooltip("Records:Q", title="records", format=",")],
+    ).properties(height=230)
+    return Panel(f"{m.title()} across {p.short(dim)}", ch, frame,
+                 f"{len(frame)} in sequence · {m.why}", "sequence_trend",
+                 [m.col, dim])

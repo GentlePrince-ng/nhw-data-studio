@@ -118,6 +118,8 @@ class Profile:
     kobo: dict = field(default_factory=dict)
     dropped: list = field(default_factory=list)
     truncated: int = 0                   # rows beyond the read cap, if any
+    sheets_used: list = field(default_factory=list)
+    sheets_skipped: list = field(default_factory=list)
 
     def by_role(self, *roles: str) -> list:
         return [c for c in self.columns.values() if c.role in roles]
@@ -204,6 +206,52 @@ def sheet_names(data: bytes, name: str) -> list:
         return list(xl.sheet_names)
 
 
+def find_header(raw: pd.DataFrame, look: int = 15) -> int:
+    """Which row holds the column names.
+
+    A hand-maintained tracker almost never starts with its header: there is a
+    title, some blank rows, maybe a note, and then the table. Read with the
+    default `header=0` and a campaign tracker came out as **one column and 71
+    rows** — the title became the only column name and every real heading became
+    data. Nothing downstream can recover from that.
+
+    The header is taken to be the row with the most filled cells among the first
+    few, requiring that its values are distinct (a header does not repeat a
+    label) and that there is data underneath. A normal file wins on row 0
+    immediately, so well-formed exports are unaffected.
+    """
+    if raw.empty:
+        return 0
+    block = raw.head(look)
+    filled = block.notna().sum(axis=1)
+    best, best_score = 0, -1.0
+    for r in range(min(look, len(block))):
+        vals = block.iloc[r].dropna()
+        n = len(vals)
+        if n < 2:
+            continue
+        labels = [str(v).strip() for v in vals]
+        wordy = sum(1 for v in labels
+                    if not str(v).replace(".", "", 1).lstrip("-").isdigit())
+        # An all-numeric row is data, never a header. Without this, a sheet
+        # whose real header repeats a label ("x", "x", "y") had that row
+        # rejected and the first row of numbers promoted instead, quietly
+        # eating a record.
+        if wordy == 0:
+            continue
+        # Rows below must carry data.
+        below = filled.iloc[r + 1: r + 6]
+        if below.empty or float(below.mean()) < max(2.0, n * 0.4):
+            continue
+        # Repeated labels are a smell, not a disqualification: real trackers do
+        # ship two columns called "Notes".
+        dupes = len(labels) - len(set(labels))
+        score = n + wordy * 0.5 - dupes - r * 0.01   # earlier row wins a tie
+        if score > best_score:
+            best, best_score = r, score
+    return best
+
+
 def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
     """Read CSV or Excel into a frame, tolerating the usual export mess."""
     low = name.lower()
@@ -214,16 +262,52 @@ def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
         last = None
         for enc in ("utf-8-sig", "cp1252", "latin-1"):
             try:
-                return pd.read_csv(io.BytesIO(data), sep=sep, engine="python",
-                                   encoding=enc, na_values=NA_STRINGS,
-                                   nrows=nrows, on_bad_lines="skip")
+                return _apply_header(pd.read_csv(
+                    io.BytesIO(data), sep=sep, engine="python", encoding=enc,
+                    na_values=NA_STRINGS, nrows=nrows, header=None,
+                    on_bad_lines="skip"))
             except (UnicodeDecodeError, LookupError) as exc:
                 last = exc
         raise ValueError("Could not decode this CSV — try saving it as .xlsx") from last
-    frame = pd.read_excel(io.BytesIO(data), sheet_name=sheet if sheet else 0,
-                          na_values=NA_STRINGS, nrows=nrows)
-    if isinstance(frame, dict):
-        frame = next(iter(frame.values()))
+    raw = pd.read_excel(io.BytesIO(data), sheet_name=sheet if sheet else 0,
+                        na_values=NA_STRINGS, header=None, nrows=nrows)
+    if isinstance(raw, dict):
+        raw = next(iter(raw.values()))
+    return _apply_header(raw)
+
+
+def _apply_header(raw: pd.DataFrame) -> pd.DataFrame:
+    """Promote the detected header row and drop everything above it."""
+    if raw.empty:
+        return raw
+    h = find_header(raw)
+    frame = raw.iloc[h + 1:].reset_index(drop=True)
+    names, seen = [], {}
+    for i, v in enumerate(raw.iloc[h].tolist()):
+        label = str(v).strip() if pd.notna(v) else f"Unnamed: {i}"
+        if not label or label.lower() == "nan":
+            label = f"Unnamed: {i}"
+        # Duplicate headings get a suffix rather than being silently dropped:
+        # a tracker with two "Notes" columns still has two columns of notes.
+        if label in seen:
+            seen[label] += 1
+            label = f"{label} {seen[label]}"
+        else:
+            seen[label] = 1
+        names.append(label)
+    frame.columns = names
+    # Reading with header=None makes pandas infer every column as object,
+    # because the title row sits in the same column as the numbers. Restoring
+    # the types here matters more than it looks: `_looks_like_id` asks whether a
+    # column is numeric, so an all-object frame had "No of Views" — near-unique
+    # integers — filed as an identifier and dropped from the measures entirely.
+    frame = frame.infer_objects()
+    for col in frame.columns:
+        if frame[col].dtype == object:
+            asnum = pd.to_numeric(frame[col], errors="coerce")
+            filled = frame[col].notna().sum()
+            if filled and asnum.notna().sum() / filled > 0.95:
+                frame[col] = asnum
     return frame
 
 
@@ -323,7 +407,12 @@ def _looks_like_id(name, s: pd.Series, unique: int, filled: int) -> bool:
     if filled <= 20 or unique / filled < 0.95:
         return False
     if not pd.api.types.is_numeric_dtype(s):
-        return True                      # near-unique text: a code or free text
+        # Unless it is numbers wearing an object dtype, which is what an
+        # unheadered read produces.
+        asnum = pd.to_numeric(s, errors="coerce")
+        if not (filled and asnum.notna().sum() / filled > 0.95):
+            return True                  # near-unique text: a code or free text
+        s = asnum
     nums = pd.to_numeric(s, errors="coerce").dropna()
     if nums.empty or not bool(np.all(np.mod(nums.to_numpy(dtype="float64"), 1) == 0)):
         return False                     # fractional values: a measurement
@@ -566,9 +655,72 @@ def multi_counts(df: pd.DataFrame, members: list) -> pd.DataFrame:
     return out[out["n"] > 0].reset_index(drop=True)
 
 
+ALL_SHEETS = "__all_sheets__"
+
+
+def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
+    """Stack every sheet that shares the workbook's dominant layout.
+
+    A hand-maintained tracker is usually one sheet per week, and the analysis
+    everybody wants is all of them together — the campaign tracker this was
+    written for has eleven weekly sheets, a Videos sheet and a Summary. Reading
+    one sheet at a time makes the tool show a twelfth of the campaign.
+
+    The dominant layout is the most common set of column names. A sheet joins if
+    it shares at least `min_overlap` of that set, which keeps a Summary sheet of
+    pre-aggregated totals out of a pile of raw rows — including it would double
+    count everything. Which sheets joined, and which did not, is returned so the
+    page can say so rather than quietly leaving data out.
+
+    The sheet name becomes a column. For a weekly tracker with no date column
+    that is the only time axis in the file, and it is what makes a trend
+    possible at all.
+    """
+    frames, skipped = {}, []
+    with pd.ExcelFile(io.BytesIO(data)) as xl:
+        names = list(xl.sheet_names)
+        for sh in names:
+            try:
+                raw = pd.read_excel(xl, sheet_name=sh, na_values=NA_STRINGS,
+                                    header=None)
+            except Exception:
+                skipped.append((sh, "could not be read"))
+                continue
+            f = _apply_header(raw).dropna(axis=0, how="all")
+            real = [c for c in f.columns if not re.match(r"^Unnamed: \d+$", str(c))]
+            if len(f) == 0 or len(real) < 2:
+                skipped.append((sh, "no data rows"))
+                continue
+            frames[sh] = f[real]
+
+    if not frames:
+        return None, [], skipped
+    from collections import Counter
+    shapes = Counter(frozenset(f.columns) for f in frames.values())
+    modal = set(max(shapes, key=lambda k: (shapes[k], len(k))))
+    keep, out = [], []
+    for sh, f in frames.items():
+        overlap = len(modal & set(f.columns)) / max(len(modal), 1)
+        if overlap < min_overlap:
+            skipped.append((sh, f"different layout ({overlap:.0%} of the columns "
+                                "in common)"))
+            continue
+        g = f.copy()
+        g.insert(0, "Sheet", sh)
+        keep.append(sh)
+        out.append(g)
+    if not out:
+        return None, [], skipped
+    combined = pd.concat(out, ignore_index=True, sort=False)
+    return combined, keep, skipped
+
+
 def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Profile:
     """Upload bytes to a fully typed Profile. The one entry point the app calls."""
-    raw = read_any(data, name, sheet)
+    joined, used, skipped = (None, [], [])
+    if sheet == ALL_SHEETS:
+        joined, used, skipped = combine_sheets(data, name)
+    raw = joined if joined is not None else read_any(data, name, sheet)
     # Blank rows go; wholly blank *columns* stay, and are marked EMPTY. A column
     # nobody filled in is a finding about the form, and dropping it here would
     # make it invisible on the column map where someone can act on it.
@@ -580,8 +732,10 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
         truncated = len(raw) - row_cap
         raw = raw.head(row_cap)
     df, cols = classify(raw)
-    prof = Profile(df=df, columns=cols, source=name, sheet=sheet or "",
+    prof = Profile(df=df, columns=cols, source=name,
+                   sheet=(f"{len(used)} sheets combined" if used else (sheet or "")),
                    truncated=truncated)
+    prof.sheets_used, prof.sheets_skipped = used, skipped
     prof.kobo = kobo_groups(cols)
     prof.dropped = [c.name for c in cols.values() if c.role in (EMPTY, CONSTANT)]
     return prof
