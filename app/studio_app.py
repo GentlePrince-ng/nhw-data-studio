@@ -419,8 +419,11 @@ def page_brief(prof, found, filt):
     # app like no key at all until it is copied across here.
     try:
         if "ANTHROPIC_API_KEY" in st.secrets:
-            os.environ.setdefault("ANTHROPIC_API_KEY",
-                                  str(st.secrets["ANTHROPIC_API_KEY"]))
+            # .strip(): a key pasted with a trailing newline or a stray space
+            # goes into the auth header verbatim and comes back 401, which looks
+            # exactly like a revoked key.
+            os.environ.setdefault(
+                "ANTHROPIC_API_KEY", str(st.secrets["ANTHROPIC_API_KEY"]).strip())
     except Exception:
         pass
     ok, why = narrative.available()
@@ -435,6 +438,13 @@ def page_brief(prof, found, filt):
         st.warning(f"{why} Everything else in the app works without it — the "
                    "Findings page is the same analysis in list form.")
         return
+    good, problem = _key_ok(os.environ.get("ANTHROPIC_API_KEY", "")[-8:])
+    if not good:
+        st.error(problem)
+        st.caption("Everything else in the app works without a key — the "
+                   "Findings page is this same analysis in list form.")
+        return
+
     effort = st.radio("Depth", ["medium", "high"], horizontal=True,
                       help="Higher takes longer and costs more.")
     payload = narrative.build_payload(
@@ -457,6 +467,13 @@ def page_brief(prof, found, filt):
                            mime="text/markdown")
     with st.expander("Exactly what gets sent", False):
         st.code(payload[:20000], language="markdown")
+
+
+@st.cache_data(show_spinner="Checking the API key…", ttl=900)
+def _key_ok(key_tail: str):
+    """Cached per key, so replacing the secret re-checks and a good key is
+    verified once rather than on every rerun."""
+    return narrative.verify_key()
 
 
 # ═══ welcome ════════════════════════════════════════════════════════════════

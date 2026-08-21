@@ -76,6 +76,36 @@ def available() -> tuple[bool, str]:
     return True, ""
 
 
+def verify_key() -> tuple[bool, str]:
+    """Ask the API whether the configured key actually works, before use.
+
+    `available()` only proves a key is *present*. A revoked or mistyped key looks
+    identical until someone composes a brief, clicks, waits, and gets a raw 401 —
+    which reads as "the tool is broken" rather than "replace this key". A key that
+    had been sitting in a file since June turned out to be revoked, and this is
+    the check that would have said so immediately.
+
+    `models.list` is the cheapest authenticated call there is: no tokens, no
+    charge, and it doubles as the answer to which models the key can reach.
+    """
+    import anthropic
+    try:
+        anthropic.Anthropic().models.list(limit=1)
+        return True, ""
+    except anthropic.AuthenticationError:
+        return False, ("The configured API key was rejected as invalid. It has "
+                       "most likely been revoked or rotated — check it in the "
+                       "Anthropic console, then replace it in the app's "
+                       "secrets. Nothing else in the app is affected.")
+    except anthropic.PermissionDeniedError:
+        return False, ("The key is valid but not permitted to use this API. "
+                       "Check the workspace it belongs to in the console.")
+    except anthropic.APIStatusError as exc:
+        return False, f"The API rejected the key check: {exc.status_code} — {exc.message}"
+    except anthropic.APIConnectionError:
+        return False, "Could not reach the API to check the key."
+
+
 def build_payload(prof, findings, extra_tables=None) -> str:
     """The prompt body: aggregates only, in a shape that is cheap to read."""
     lines = [f"# Dataset: {prof.source}" + (f" (sheet {prof.sheet})" if prof.sheet else ""),
