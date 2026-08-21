@@ -595,11 +595,23 @@ def numeric_stats(s: pd.Series):
         return {}, {}
     hits = {}
     if float(clean.max()) >= 98 or float(clean.min()) < 0:
+        # A sentinel has to be an OUTLIER as well as a spike. 98/99/999 are
+        # ordinary values in a web metric — a page with 99 entries is not
+        # "don't know" — so a candidate must also sit outside the bulk of the
+        # distribution. On a survey age column 99 clears the 97.5th percentile
+        # of everything else; on a pageviews column it is nowhere near it.
         for sv in SENTINELS:
             c = int((clean == sv).sum())
-            # A sentinel only counts when it is a spike, not the natural range.
-            if c and c / len(clean) > 0.005:
-                hits[sv] = c
+            if not c or c / len(clean) <= 0.005:
+                continue
+            rest = clean[clean != sv]
+            if rest.empty:
+                continue
+            if sv > 0 and sv <= float(rest.quantile(0.975)):
+                continue
+            if sv < 0 and sv >= float(rest.quantile(0.025)):
+                continue
+            hits[sv] = c
     real = clean[~clean.isin(list(hits))] if hits else clean
     if real.empty:
         real, hits = clean, {}
