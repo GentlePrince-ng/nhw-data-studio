@@ -316,6 +316,8 @@ def download_row(prof, found, panels, label: str, key: str):
 def page_overview(prof, found, filt):
     theme.band("Overview", f"{prof.source}" + (f" · {prof.sheet}" if prof.sheet else "")
                + (f" · filtered: {filt}" if filt else ""))
+    if prof.sheet_note:
+        st.info(prof.sheet_note)
 
     overrides = st.session_state.setdefault("_agg_overrides", {})
     ms = metrics.measures(prof, limit=5, overrides=overrides)
@@ -660,6 +662,11 @@ def main():
         st.sidebar.caption("Combined: " + ", ".join(base.sheets_used))
     for name_, why in base.sheets_skipped:
         st.sidebar.caption(f"Left out — **{name_}**: {why}")
+    if base.total_rows_dropped:
+        st.sidebar.caption(
+            f"**{base.total_rows_dropped}** row(s) labelled Total or Subtotal "
+            "were removed: they are sums of the other rows, and counting them "
+            "again would double every figure.")
     st.sidebar.caption("Nothing is stored. Close the tab and it is gone.")
 
     {"Overview": page_overview, "Findings": page_findings,

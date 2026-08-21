@@ -42,7 +42,8 @@ SUM_WORDS = ("count", "total", "number", "num", "visits", "attendance",
              # wants their totals. A tracker came out with retweets summed but
              # likes and views averaged — same kind of number, different
              # treatment, purely because of where the integer cut-off fell.
-             "views", "impressions", "reach", "likes", "retweets", "shares",
+             "views", "pageviews", "pageview", "sessions", "impressions",
+             "reach", "likes", "retweets", "shares", "emails", "articles",
              "comments", "clicks", "engagement", "engagements", "followers",
              "subscribers", "plays", "watch", "downloads", "opens", "sends",
              "bookmarks", "quotes", "saves", "replies", "mentions", "posts")
@@ -145,9 +146,12 @@ def _agg_for(name: str, stats: dict) -> tuple[str, str]:
     tokens = set(low.split())
     if low.startswith(COUNT_PREFIXES):
         return "sum", "totalled: the name opens by counting something"
-    if tokens & set(MEAN_WORDS) or any(w in low for w in MEAN_WORDS):
+    # Whole tokens only. Substring matching read "Combined_pageviews" as a rate
+    # because "pageviews" contains "age", so the headline metric of an editorial
+    # report was averaged instead of totalled — 146 rather than 15,142.
+    if tokens & set(MEAN_WORDS):
         return "mean", "averaged: the name reads as a rate, level or duration"
-    if tokens & set(SUM_WORDS) or any(w in low for w in SUM_WORDS):
+    if tokens & set(SUM_WORDS):
         return "sum", "totalled: the name reads as a count or an amount"
     # No signal in the name. Small non-negative integers behave like counts;
     # anything else is safer averaged.
@@ -283,6 +287,54 @@ def ordinal_order(values) -> list:
         return []
     parsed.sort()
     return [lab for _, lab in parsed]
+
+
+def label_column(prof: pf.Profile) -> str | None:
+    """The column that names the *thing* each row is about.
+
+    Page titles, article headlines, video titles, facility names. Too many
+    distinct values to be a dimension — 9,295 page titles will never be a bar
+    chart of categories — but they are exactly what a "top 15 by views" chart
+    ranks, and without one a GA4 export of 9,295 rows and 127,836 views produced
+    no charts whatsoever.
+
+    Prefers the first column of the sheet when it qualifies, because that is
+    where a person puts the name of the thing.
+    """
+    best, best_score = None, -1.0
+    for i, (name, c) in enumerate(prof.columns.items()):
+        if c.role not in (pf.IDENTIFIER, pf.TEXT, pf.CATEGORICAL, pf.GEO):
+            continue
+        if pf.is_system(name) or c.filled < max(3, 0.3 * c.n):
+            continue
+        vals = prof.df[name].dropna().astype(str)
+        if vals.empty:
+            continue
+        avg_len = float(vals.str.len().mean())
+        # A label is a name, not a URL and not a paragraph.
+        if avg_len > 120 or vals.str.startswith(("http://", "https://")).mean() > 0.5:
+            continue
+        distinct = c.unique / max(c.filled, 1)
+        if distinct < 0.3:                    # that is a dimension, not a label
+            continue
+        score = distinct + (0.4 if i < 3 else 0) - min(avg_len, 100) / 400
+        if score > best_score:
+            best, best_score = name, score
+    return best
+
+
+def rank_items(df: pd.DataFrame, m: Measure, label: str, prof: pf.Profile,
+               top: int = 15, worst: bool = False) -> pd.DataFrame:
+    """The top (or bottom) rows by a measure, one row per label."""
+    d = pd.DataFrame({"Item": df[label].astype(str).str.strip(),
+                      "_v": apply(df, m, prof)}).dropna()
+    if d.empty:
+        return pd.DataFrame()
+    g = d.groupby("Item", observed=True)["_v"].agg([m.pagg, "size"])
+    g.columns = [m.verb, "Records"]
+    g[m.verb] = (g[m.verb] * m.scale).round(2)
+    g = g.sort_values(m.verb, ascending=bool(worst)).reset_index()
+    return g.head(top)
 
 
 def _series(df: pd.DataFrame, m: Measure) -> pd.Series:

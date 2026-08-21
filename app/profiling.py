@@ -76,6 +76,17 @@ COORD_WORDS = ("latitude", "longitude", "lat", "lon", "lng", "altitude",
                "easting", "northing", "elevation")
 
 
+# Time parts held as numbers: a year is a label for a period, not a quantity.
+# "Average year 2021" is not a metric, and summing them is worse.
+TIME_PART_WORDS = ("year", "yr", "month", "mth", "week", "wk", "day", "quarter",
+                   "qtr", "fy", "epoch", "timestamp", "hour", "minute")
+
+
+def _is_time_part(name) -> bool:
+    low = re.sub(r"[^a-z ]+", " ", str(name).lower())
+    return bool(set(low.split()) & set(TIME_PART_WORDS))
+
+
 def _is_coordinate(name) -> bool:
     """A GPS field, not a measurement. Never a measure, never a correlation."""
     low = re.sub(r"[^a-z ]+", " ", str(name).lower())
@@ -120,6 +131,8 @@ class Profile:
     truncated: int = 0                   # rows beyond the read cap, if any
     sheets_used: list = field(default_factory=list)
     sheets_skipped: list = field(default_factory=list)
+    total_rows_dropped: int = 0
+    sheet_note: str = ""
 
     def by_role(self, *roles: str) -> list:
         return [c for c in self.columns.values() if c.role in roles]
@@ -186,9 +199,14 @@ class Profile:
         "Average geo-point latitude", which is not a number anybody wants a mean
         of. They are location, not measurement.
         """
+        # min(3, n) rather than a flat floor of 5: a four-row sheet of podcast
+        # episodes had every numeric column excluded by the floor, so the page
+        # showed a record count and nothing else.
+        floor = min(max(3, int(0.2 * self.rows)), max(self.rows, 1))
         out = [c for c in self.by_role(NUMERIC)
-               if c.filled >= max(5, 0.2 * c.n) and c.stats.get("std", 0) > 0
-               and not _is_coordinate(c.name)]
+               if c.filled >= floor and c.stats.get("std", 0) > 0
+               and not _is_coordinate(c.name)
+               and not _is_time_part(c.name)]
         out.sort(key=lambda c: -c.filled)
         return out[:limit]
 
@@ -303,7 +321,11 @@ def _apply_header(raw: pd.DataFrame) -> pd.DataFrame:
     # integers — filed as an identifier and dropped from the measures entirely.
     frame = frame.infer_objects()
     for col in frame.columns:
-        if frame[col].dtype == object:
+        # _texty, not `== object`: pandas 3 gives strings the `str` dtype, so an
+        # object-only test silently skipped every column and left the numbers as
+        # text — which is how a Views column of four-digit counts reached the
+        # date parser at all.
+        if _texty(frame[col]):
             asnum = pd.to_numeric(frame[col], errors="coerce")
             filled = frame[col].notna().sum()
             if filled and asnum.notna().sum() / filled > 0.95:
@@ -465,6 +487,15 @@ def _try_dates(s: pd.Series):
     first = sample.iloc[0]
     if not any(ch in first for ch in "-/:") and not re.match(r"^\d{4}", first):
         return None
+    # A column of bare four-digit numbers is only a date if those numbers are
+    # plausible years. Without this, Views of [1954, 4650, 2100, 2629] parsed as
+    # 1954-01-01, 4650-01-01 … and the headline measure of a podcast sheet
+    # became a datetime column.
+    bare = sample.str.fullmatch(r"\s*\d{4}(\.0)?\s*")
+    if bare.mean() > 0.5:
+        years = pd.to_numeric(sample.str.extract(r"(\d{4})")[0], errors="coerce")
+        if not ((years >= 1900) & (years <= 2100)).all():
+            return None
     try:
         parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
     except Exception:
@@ -655,6 +686,35 @@ def multi_counts(df: pd.DataFrame, members: list) -> pd.DataFrame:
     return out[out["n"] > 0].reset_index(drop=True)
 
 
+TOTAL_LABELS = {"total", "totals", "grand total", "sum", "subtotal",
+                "overall", "all", "average", "mean", "grand totals"}
+
+
+def drop_total_rows(frame: pd.DataFrame):
+    """Remove subtotal rows that live inside the data, and count them.
+
+    A YouTube export in a real report workbook opens with a row labelled
+    "Total" carrying the sum of every video below it. Left in, every total the
+    tool reports is exactly double, every average is wrong, and "Total" appears
+    as a category in its own right. Dropped silently it would be worse — so the
+    count comes back and the page says what went.
+
+    Only a row whose *first* filled text cell is a total label counts, so an
+    article headline containing the word "total" is safe.
+    """
+    if frame.empty:
+        return frame, 0
+    text_cols = [c for c in frame.columns
+                 if frame[c].dtype == object or pd.api.types.is_string_dtype(frame[c])]
+    if not text_cols:
+        return frame, 0
+    first = frame[text_cols[0]].astype(str).str.strip().str.lower()
+    mask = first.isin(TOTAL_LABELS).to_numpy()
+    if not mask.any():
+        return frame, 0
+    return frame.loc[~mask].reset_index(drop=True), int(mask.sum())
+
+
 ALL_SHEETS = "__all_sheets__"
 
 
@@ -695,9 +755,25 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
 
     if not frames:
         return None, [], skipped
-    from collections import Counter
-    shapes = Counter(frozenset(f.columns) for f in frames.values())
-    modal = set(max(shapes, key=lambda k: (shapes[k], len(k))))
+    # The dominant layout is the one holding the most ROWS, not the one on the
+    # most sheets. Counting sheets picked a two-column "Metric | Value" shape
+    # shared by three summary tabs of a fourteen-sheet report workbook, stacked
+    # them into 25 rows, and skipped the eleven sheets with the actual data —
+    # including a 9,299-row GA4 export.
+    from collections import defaultdict
+    weight, sheets_of = defaultdict(int), defaultdict(list)
+    for sh, f in frames.items():
+        key = frozenset(f.columns)
+        weight[key] += len(f)
+        sheets_of[key].append(sh)
+    modal_key = max(weight, key=lambda k: (weight[k], len(sheets_of[k])))
+    modal = set(modal_key)
+    # One sheet is not a combination. A report workbook of unrelated tables has
+    # nothing to stack, and pretending otherwise hides the data behind a
+    # meaningless union.
+    if len(sheets_of[modal_key]) < 2:
+        biggest = max(frames, key=lambda sh: len(frames[sh]))
+        return None, [], [("__fallback__", biggest)]
     keep, out = [], []
     for sh, f in frames.items():
         overlap = len(modal & set(f.columns)) / max(len(modal), 1)
@@ -718,9 +794,19 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
 def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Profile:
     """Upload bytes to a fully typed Profile. The one entry point the app calls."""
     joined, used, skipped = (None, [], [])
+    note = ""
     if sheet == ALL_SHEETS:
         joined, used, skipped = combine_sheets(data, name)
+        if joined is None and skipped and skipped[0][0] == "__fallback__":
+            # Nothing to combine: show the sheet with the most data and say so,
+            # rather than a union of whatever happened to share two columns.
+            sheet = skipped[0][1]
+            note = (f"The sheets have different layouts, so there is nothing to "
+                    f"combine. Showing **{sheet}**, the one with the most data — "
+                    "pick another in the sidebar.")
+            skipped = []
     raw = joined if joined is not None else read_any(data, name, sheet)
+    raw, totals = drop_total_rows(raw)
     # Blank rows go; wholly blank *columns* stay, and are marked EMPTY. A column
     # nobody filled in is a finding about the form, and dropping it here would
     # make it invisible on the column map where someone can act on it.
@@ -736,6 +822,7 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
                    sheet=(f"{len(used)} sheets combined" if used else (sheet or "")),
                    truncated=truncated)
     prof.sheets_used, prof.sheets_skipped = used, skipped
+    prof.total_rows_dropped, prof.sheet_note = totals, note
     prof.kobo = kobo_groups(cols)
     prof.dropped = [c.name for c in cols.values() if c.role in (EMPTY, CONSTANT)]
     return prof

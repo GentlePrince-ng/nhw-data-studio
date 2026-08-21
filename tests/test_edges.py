@@ -229,6 +229,63 @@ def tracker_checks() -> None:
     ck("a file with no date column still gets a trend",
        "sequence_trend" in kinds, str(kinds))
 
+    # A report workbook: many sheets, all different, plus an embedded Total row.
+    buf = io.BytesIO()
+    rng2 = np.random.default_rng(4)
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        pd.DataFrame({"Metric": ["Sent", "Opened"], "Value": [10, 4]}
+                     ).to_excel(xw, sheet_name="Mail_Summary", index=False,
+                                startrow=3)
+        pd.DataFrame({"Metric": ["Old", "New"], "Value": [100, 20]}
+                     ).to_excel(xw, sheet_name="Traffic", index=False, startrow=3)
+        big = pd.DataFrame({"Page title": ["Total"] + [f"Article {i}" for i in range(60)],
+                            "Views": [12345] + list(rng2.integers(5, 900, 60)),
+                            "Active users": [9000] + list(rng2.integers(2, 400, 60))})
+        big.to_excel(xw, sheet_name="GA4_Raw", index=False, startrow=3)
+    rep = pf.build(buf.getvalue(), "report.xlsx", sheet=pf.ALL_SHEETS)
+    ck("unrelated sheets are not stacked into a meaningless union",
+       rep.rows > 50 and not rep.sheets_used,
+       f"{rep.rows} rows, used {rep.sheets_used}")
+    ck("it falls back to the sheet with the most data, and says why",
+       "GA4_Raw" in rep.sheet_note, rep.sheet_note[:70])
+    ck("an embedded Total row is removed",
+       rep.total_rows_dropped == 1 and rep.rows == 60,
+       f"{rep.rows} rows, {rep.total_rows_dropped} dropped")
+    # The right check is that the subtotal's own value is gone, not that the
+    # remaining sum is smaller — sixty random articles can legitimately add up
+    # to more than one subtotal row.
+    # A long list of named things with metrics — a GA4 export, an article list.
+    buf2 = io.BytesIO()
+    rng3 = np.random.default_rng(12)
+    n = 300
+    with pd.ExcelWriter(buf2, engine="xlsxwriter") as xw:
+        pd.DataFrame({
+            "Page title": [f"An article about health topic {i}" for i in range(n)],
+            "Views": rng3.integers(1, 9000, n),
+            "Active users": rng3.integers(1, 4000, n),
+            "Combined_pageviews": rng3.integers(1, 500, n),
+        }).to_excel(xw, sheet_name="GA4", index=False, startrow=3)
+    ga4 = pf.build(buf2.getvalue(), "ga4.xlsx")
+    ck("a long tail of labels still produces charts",
+       any(q.kind == "top_items" for q in charts.dashboard(ga4, limit=6)),
+       "300 titles and no dimension gave an empty dashboard")
+    aggs2 = {m.col: m.agg for m in metrics.measures(ga4, limit=5)}
+    ck("pageviews are totalled, not averaged because of the letters a-g-e",
+       aggs2.get("Combined_pageviews") == "sum", str(aggs2))
+    tiny = pf.build(pd.DataFrame({
+        "Episode": ["Ep 1", "Ep 2", "Ep 3", "Ep 4"],
+        "Views": [1954, 4650, 2100, 2629],
+        "Subscribers_Gained": [8, 17, 9, 10]}).to_csv(index=False).encode(),
+        "tiny.csv")
+    ck("a four-row sheet still has measures",
+       any(m.col == "Views" for m in metrics.measures(tiny)),
+       "the floor of 5 filled values excluded everything")
+
+    ck("the subtotal's value is no longer in the data",
+       12345 not in set(rep.df["Views"].tolist())
+       and 9000 not in set(rep.df["Active users"].tolist()),
+       "the Total row's figures are still present")
+
 
 def main() -> int:
     rng = np.random.default_rng(11)

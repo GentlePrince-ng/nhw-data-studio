@@ -568,6 +568,7 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
     place = p.best_geo()
     panels = []
 
+    label_col = metrics.label_column(p) if len(dims) < 3 else None
     seq_dim = next((d.name for d in dims
                     if len(metrics.ordinal_order(p.df[d.name])) >= 3), None)
     for m in ms[:3]:
@@ -584,6 +585,11 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
             panels.append(measure_by(p, m, dim.name, min_spread=0.12))
         if date and dims:
             panels.append(change_by(p, m, dims[0].name, date))
+        # A long tail of named things: rank them. This is the only chart a GA4
+        # export or an article list can support, and it is also the one anybody
+        # would ask for first.
+        if label_col and m.col != metrics.RECORDS.col:
+            panels.append(top_items(p, m, label_col))
         if place and m.col != metrics.RECORDS.col:
             panels.append(state_map(p, place, m.col,
                                     "mean" if m.agg == "mean" else "sum",
@@ -623,3 +629,26 @@ def sequence_trend(p: pf.Profile, m, dim: str) -> Panel | None:
     return Panel(f"{m.title()} across {p.short(dim)}", ch, frame,
                  f"{len(frame)} in sequence · {m.why}", "sequence_trend",
                  [m.col, dim])
+
+def top_items(p: pf.Profile, m, label: str, top: int = 15) -> Panel | None:
+    """A ranked bar of the individual things that make up a measure.
+
+    The right chart for a long tail: articles, pages, videos, facilities. A
+    dimension has a handful of values and answers "which group"; a label has
+    thousands and answers "which one" — and "which one" is the question an
+    editorial or campaign report is written to answer.
+    """
+    from . import metrics
+    frame = metrics.rank_items(p.df, m, label, p, top=top)
+    if frame.empty or len(frame) < 3:
+        return None
+    total = metrics.total(p.df, m, p)
+    shown = float(pd.to_numeric(frame[m.verb], errors="coerce").sum())
+    note = f"top {len(frame)} of {p.df[label].nunique():,}"
+    if m.agg == "sum" and total:
+        note += f" · they are {shown / total:.0%} of the {m.title().lower()}"
+    d = frame.copy()
+    d["Item"] = d["Item"].str.slice(0, 58)
+    return Panel(f"{m.title()} — top {len(frame)} by {p.short(label)}",
+                 theme.bar(d, m.verb, "Item", fmt=m.fmt()), frame, note,
+                 "top_items", [m.col, label])
