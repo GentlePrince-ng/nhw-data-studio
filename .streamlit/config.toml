@@ -1,0 +1,15 @@
+# NO [server] SECTION, EVER.
+# Any [server] block makes Streamlit Community Cloud restart the app onto port
+# 8502 while its proxy still serves 8501: the app runs but is unreachable.
+# (Same trap that took GLIDE down once.)
+
+[theme]
+base = "light"
+primaryColor = "#166335"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7FAF8"
+textColor = "#080A09"
+font = "Poppins"
+
+[browser]
+gatherUsageStats = false

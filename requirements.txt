@@ -1,0 +1,34 @@
+# NHW Data Studio — runtime.
+# Anything imported by app/ must be listed here. A missing transitive dep is how
+# a Streamlit Community Cloud rebuild takes a working app down weeks after the
+# last commit, so the awkward ones are pinned rather than left open.
+
+streamlit>=1.36,<2
+altair>=5.3,<7
+
+# The typing pass handles both pandas generations: 2.x reads text as object,
+# 3.x reads it as StringDtype. Do not narrow this without re-running
+# tests/test_pipeline.py — every column role depends on that distinction.
+pandas>=2.2
+numpy>=1.26
+scipy>=1.11            # chi-square for the association findings
+
+# Reading uploads
+openpyxl>=3.1          # .xlsx / .xlsm
+xlsxwriter>=3.1        # writing the Excel download
+
+# Rendering charts to SVG/PNG for the offline HTML report. Pure-Rust wheel, no
+# system dependencies, no browser. Without it the app still runs and the report
+# still builds — it falls back to tables and says so on the page.
+vl-convert-python>=1.6
+
+# NOT runtime dependencies. The Nigeria boundary files in static/ are vendored
+# GeoJSON, read with the standard-library json module. geopandas and shapely are
+# needed only to REBUILD them from a source boundary layer:
+#   pip install geopandas shapely && python static/build_boundaries.py
+# Keeping them out of here is deliberate — they are the heaviest wheels in the
+# geo stack and a Streamlit Community Cloud build does not need them to draw a map.
+
+# Optional — only the "Written brief" page needs it. Left out of the default
+# install so the tool works with no API key and no account:
+#   pip install anthropic
