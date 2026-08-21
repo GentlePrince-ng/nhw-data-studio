@@ -31,4 +31,8 @@ vl-convert-python>=1.6
 
 # Optional — only the "Written brief" page needs it. Left out of the default
 # install so the tool works with no API key and no account:
-#   pip install anthropic
+#   pip install "anthropic>=1"
+# Pin the major version: app/narrative.py passes `output_config` and `fallbacks`,
+# which older 0.x releases do not accept. Nothing it uses was removed in 1.x
+# (no sampling parameters, no Text Completions, no raw-response helpers), so the
+# same code runs on both — but 0.x will reject those two arguments.

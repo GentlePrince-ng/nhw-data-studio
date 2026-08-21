@@ -116,7 +116,7 @@ Joining a spreadsheet to a boundary file is where a map goes wrong, so:
 - **Findings** — everything, filterable by type and severity, each with the figures behind it.
 - **Data health** — the issues, completeness by column, the full column map, duplicate rows, and a typed CSV copy of your data.
 - **Explore** — pick a column and something to break it down by; the chart type follows the pair of roles (two numerics → scatter with the correlation stated; numeric by category → group means with small groups flagged; date by category → lines; two categories → row-percentaged crosstab).
-- **Written brief** — optional. Sends the *aggregates* — column map, finding sentences, small summary tables — to Claude and asks for a draft brief in four sections. No row of data leaves the machine, and the model is instructed to use no number it was not given. Needs `pip install anthropic` and `ANTHROPIC_API_KEY`; everything else works without it.
+- **Written brief** — optional. Sends the *aggregates* — column map, finding sentences, small summary tables — to Claude and asks for a draft brief in four sections. No row of data leaves the machine, and the model is instructed to use no number it was not given. Needs `pip install "anthropic>=1"` and a key in `ANTHROPIC_API_KEY` or `.streamlit/secrets.toml` (which the app copies into the environment itself, because Streamlit does not). Everything else works without it, and the page says which of the two is missing.
 
 ## Size
 
