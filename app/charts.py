@@ -448,3 +448,127 @@ def auto_panels(p: pf.Profile, limit: int = 8) -> list:
     for c in p.headline_nums(limit=3):
         panels.append(num_hist(p, c.name))
     return panels
+
+
+# ═══ measure × dimension: the charts a dashboard is actually made of ════════
+# Everything above draws one column at a time — a distribution, a count of
+# categories. Useful once, to see what is in the file. What a reader wants is a
+# measure sliced by something: wait time by facility type, doses by month, the
+# change by state. These take a metrics.Measure and always state which
+# aggregation was used, because "average" and "total" answer different questions
+# and a bar chart shows no sign of which one it is.
+
+def measure_trend(p: pf.Profile, m, date: str | None = None,
+                  freq: str | None = None) -> Panel | None:
+    """A measure over time — the front-page chart of any dashboard."""
+    from . import metrics
+    date = date or p.best_date()
+    if not date:
+        return None
+    frame, grain = metrics.over_time(p.df, m, date, p, freq)
+    if len(frame) < 2:
+        return None
+    fmt = {"D": "%d %b", "W": "%d %b", "MS": "%b %y"}[
+        freq or metrics.grain_for(
+            (pd.to_datetime(p.df[date], errors="coerce").max()
+             - pd.to_datetime(p.df[date], errors="coerce").min()).days)]
+    ch = theme.trend(frame, "Period", m.verb, height=230, y_title=m.verb,
+                     x_format=fmt)
+    out = frame.copy()
+    out["Period"] = pd.to_datetime(out["Period"]).dt.strftime("%Y-%m-%d")
+    return Panel(f"{m.title().capitalize()} over time", ch, out,
+                 f"per {grain} · {m.why}", "metric_trend", [m.col, date])
+
+
+def measure_by(p: pf.Profile, m, dim: str, top: int = 12,
+               min_spread: float = 0.0) -> Panel | None:
+    """A measure broken down by a dimension, with the group sizes attached.
+
+    `min_spread` suppresses a breakdown that says nothing: if every group lands
+    within a few percent of the mean, the chart is noise wearing the clothes of
+    a finding. The front page passes a threshold; Explore passes none, because
+    there the reader asked for that specific cut and deserves it either way.
+    """
+    from . import metrics
+    frame = metrics.by_dimension(p.df, m, dim, p, top)
+    if frame.empty:
+        return None
+    if min_spread and len(frame) > 2             and metrics.spread(frame, m.verb) < min_spread:
+        return None
+    thin = int((frame["Records"] < 20).sum())
+    note = m.why
+    merged = frame.attrs.get("merged", 0)
+    if merged:
+        note += f" · {merged} spelling(s) merged into their commonest form"
+    if thin:
+        note += f" · {thin} group(s) under 20 records"
+    if len(frame) == top:
+        note += f" · top {top}"
+    return Panel(f"{m.title().capitalize()} by {p.label(dim)}",
+                 theme.bar(frame, m.verb, "Category", fmt=m.fmt()), frame,
+                 note, "measure_by", [m.col, dim])
+
+
+def change_by(p: pf.Profile, m, dim: str, date: str | None = None) -> Panel | None:
+    """What moved. A diverging bar of the change per dimension value.
+
+    The one chart that answers "the number changed, why" — which is the question
+    a breakdown of the *level* cannot answer, however many bars it has.
+    """
+    from . import metrics
+    date = date or p.best_date()
+    if not date:
+        return None
+    frame = metrics.change_by_dimension(p.df, m, dim, date, p)
+    if frame.empty or frame["Change"].abs().sum() == 0:
+        return None
+    d = frame.copy()
+    d["Direction"] = np.where(d["Change"] >= 0, "up", "down")
+    ch = alt.Chart(d).mark_bar(cornerRadiusEnd=3, height=13).encode(
+        x=alt.X("Change:Q", title=f"change in {m.verb.lower()}"),
+        y=alt.Y("Category:N", sort=alt.EncodingSortField(
+            field="Change", op="sum", order="descending"), title=None),
+        color=alt.Color("Direction:N", legend=None,
+                        scale=alt.Scale(domain=["up", "down"],
+                                        range=[theme.GREEN_DEEP, theme.BEHIND])),
+        tooltip=[alt.Tooltip("Category:N", title=""),
+                 alt.Tooltip("Before:Q", format=m.fmt()),
+                 alt.Tooltip("After:Q", format=m.fmt()),
+                 alt.Tooltip("Change:Q", format="+" + m.fmt()),
+                 alt.Tooltip("Records:Q", title="records now", format=",")],
+    ).properties(height=alt.Step(24))
+    win = metrics.compare_periods(p.df, m, date, p).get("window", 30)
+    return Panel(f"What moved — {m.title().lower()} by {p.label(dim)}",
+                 ch, frame,
+                 f"last {win} days against the {win} before · green up, red down",
+                 "change_by", [m.col, dim, date])
+
+
+def dashboard(p: pf.Profile, limit: int = 10) -> list:
+    """The front page: metrics over time, then broken down, then what moved.
+
+    Deliberately measure-led rather than column-led. The old front page drew
+    every interesting column once; this draws the two or three measures that
+    matter, each answered three ways — level, split, and change.
+    """
+    from . import metrics
+    ms = metrics.measures(p, limit=3)
+    dims = metrics.dimensions(p, limit=3)
+    date = p.best_date()
+    place = p.best_geo()
+    panels = []
+
+    for m in ms[:3]:
+        if date:
+            panels.append(measure_trend(p, m, date))
+        for dim in dims[:2]:
+            panels.append(measure_by(p, m, dim.name, min_spread=0.12))
+        if date and dims:
+            panels.append(change_by(p, m, dims[0].name, date))
+        if place and m.col != metrics.RECORDS.col:
+            panels.append(state_map(p, place, m.col,
+                                    "mean" if m.agg == "mean" else "sum",
+                                    level=geo_level(place)))
+        if len([x for x in panels if x]) >= limit:
+            break
+    return [x for x in panels if x][:limit]

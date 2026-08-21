@@ -30,10 +30,22 @@ both maps and building the downloadable report.
 text, geography, empty, constant — and shows you its decisions on the Data
 health page. Nothing about the analysis is hidden.
 
-**Ranks what stands out.** Data-quality problems that change how every other
-figure reads come first, then coverage, concentration, trend, distribution and
-association. Every finding is computed from the file and carries its own
-numbers. The top five are the product; nobody reads the twentieth.
+**Builds metrics, not a profile.** Columns are split into **measures** (things
+you aggregate — visits, wait time, doses) and **dimensions** (things you slice by
+— state, facility type, month). The top row carries those measures with
+period-over-period change and a sparkline, not the record count and the
+percentage of cells filled. Whether a column is totalled or averaged is a guess
+from its name, it is printed on every figure, and you can change it on the page.
+
+**Answers "what moved", not just "what is biggest".** Each measure gets three
+views: the level over time, the split by dimension, and a diverging bar of the
+*change* per dimension value between the last two equal windows. A breakdown of
+the level tells you who is largest; only a breakdown of the change tells you
+what happened.
+
+**Ranks data-quality problems, but keeps them out of the way.** They are
+collapsed into one strip on the front page and laid out in full on Data health.
+Every finding is computed from the file and carries its own numbers.
 
 **Draws the charts worth drawing.** A sixty-column sheet has about six charts in
 it. The front page picks those: a trend if there is a usable date, geography if
@@ -117,7 +129,7 @@ Joining a spreadsheet to a boundary file is where a map goes wrong, so:
 
 ## Pages
 
-- **Overview** — four KPIs, a paragraph you can paste into an email, the top six findings, the chosen charts, the downloads.
+- **Overview** — measure KPIs with period-over-period change, a paragraph you can paste into an email, then the charts: level, split, and what moved. Data-quality flags collapse into one strip; single-column distributions collapse into another. The downloads are at the foot.
 - **Findings** — everything, filterable by type and severity, each with the figures behind it.
 - **Data health** — the issues, completeness by column, the full column map, duplicate rows, and a typed CSV copy of your data.
 - **Explore** — pick a column and something to break it down by; the chart type follows the pair of roles (two numerics → scatter with the correlation stated; numeric by category → group means with small groups flagged; date by category → lines; two categories → row-percentaged crosstab).

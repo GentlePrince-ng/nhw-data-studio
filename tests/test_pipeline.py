@@ -142,6 +142,73 @@ def main() -> int:
         check("LGA map drawn where a bar cannot cope", len(maps) == 2,
               f"{len(maps)} maps")
 
+    # ── the dashboard: measures, not columns ────────────────────────────
+    from app import metrics
+    ms = metrics.measures(prof)
+    dims = metrics.dimensions(prof)
+    print()
+    print("--- measures and dimensions ---")
+    for m in ms:
+        print(f"  {m.title():34} {m.why}")
+    print("  dimensions: " + ", ".join(d.label for d in dims))
+
+    check("Records is the first measure", ms and ms[0].col == "__records__")
+    aggs = {m.col: m.agg for m in ms}
+    check("an age column is averaged, never summed",
+          aggs.get("respondent_age") == "mean", str(aggs.get("respondent_age")))
+    check("a visits column is totalled",
+          aggs.get("visits_last_year") == "sum", str(aggs.get("visits_last_year")))
+    check("wait minutes is averaged", aggs.get("wait_minutes") == "mean")
+    check("staff on duty is averaged, not summed across visits",
+          aggs.get("staff_on_duty") == "mean", str(aggs.get("staff_on_duty")))
+    check("an aggregation override wins over the guess",
+          {m.col: m.agg for m in
+           metrics.measures(prof, overrides={"respondent_age": "sum"})
+           }.get("respondent_age") == "sum")
+
+    dim_names = [d.name for d in dims]
+    check("free text is not offered as a dimension",
+          "enumerator_notes" not in dim_names, str(dim_names))
+    check("the state column is a dimension", "state" in dim_names)
+
+    cmp = metrics.compare_periods(prof.df, ms[0], prof.best_date(), prof)
+    check("period-over-period comparison computed", bool(cmp), str(cmp)[:80])
+    if cmp:
+        check("comparison windows are equal length and non-empty",
+              cmp["now"] > 0 and cmp["then"] > 0 and cmp["window"] > 0)
+
+    dash = charts.dashboard(prof, limit=10)
+    print()
+    print(f"--- dashboard: {len(dash)} panels ---")
+    for q in dash:
+        print(f"  {q.kind:14} {q.title[:60]}")
+    kinds = {q.kind for q in dash}
+    check("dashboard leads with measure charts, not distributions",
+          {"metric_trend", "measure_by"} <= kinds, str(kinds))
+    check("dashboard answers what moved", "change_by" in kinds, str(kinds))
+    check("no distribution charts on the dashboard",
+          "numeric" not in kinds, str(kinds))
+    check("every dashboard panel exports",
+          not [q.title for q in dash
+               if q.chart is not None and not report.chart_svg(q)])
+    check("every dashboard panel states its aggregation",
+          all(q.note for q in dash))
+
+    # Kano arrives as Kano / KANO / "kano " in the sample.
+    folded = metrics.by_dimension(prof.df, ms[0], "state", prof)
+    cats = list(folded["Category"])
+    check("case-variant labels are folded in breakdowns",
+          len(cats) == len(set(c.lower() for c in cats))
+          and folded.attrs.get("merged", 0) == 2,
+          f"{cats[:4]} merged={folded.attrs.get('merged')}")
+    check("folding adds the split counts together",
+          int(folded.loc[folded["Category"].str.lower() == "kano", "Total"].iloc[0])
+          > 2000, "Kano should be ~2,261, not ~1,921")
+    check("a breakdown with no variation is left off the dashboard",
+          not [q for q in dash
+               if q.kind == "measure_by" and "respondent age by" in q.title.lower()],
+          "average age by state was 34 everywhere")
+
     extra = [charts.corr_grid(prof), charts.missing_bar(prof),
              charts.cross_heat(prof, "facility_type", "satisfied_with_visit"),
              charts.scatter(prof, "wait_minutes", "staff_on_duty"),

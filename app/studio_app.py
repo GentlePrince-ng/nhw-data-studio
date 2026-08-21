@@ -22,7 +22,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import charts, gate, geo, insights, narrative, profiling as pf, report, theme  # noqa: E402
+from app import charts, gate, geo, insights, metrics, narrative, profiling as pf, report, theme  # noqa: E402
 
 ROW_CAP = 300_000        # far above the 10k target; guards a rogue 5m-row export
 PAGES = ["Overview", "Findings", "Data health", "Explore", "Written brief"]
@@ -138,6 +138,39 @@ def sidebar_filters(prof: pf.Profile):
 
 
 # ═══ shared chrome ══════════════════════════════════════════════════════════
+def metric_row(prof: pf.Profile, ms: list):
+    """KPI cards for the measures themselves, with period-over-period change.
+
+    This replaced a row reporting the record count, the column count, the
+    percentage of cells filled and the number of data-quality flags — facts
+    about the *file*, which is what made the tool read as a profiler. A
+    dashboard's top row should carry the numbers someone would put in a report:
+    the measure, how it moved, and against what.
+    """
+    date = prof.best_date()
+    cols = st.columns(min(len(ms), 4))
+    for col, m in zip(cols, ms[:4]):
+        value = metrics.total(prof.df, m, prof)
+        delta, note = "", m.why
+        if date:
+            cmp = metrics.compare_periods(prof.df, m, date, prof)
+            if cmp:
+                delta = theme.delta_chip(cmp["now"], cmp["then"],
+                                         against=cmp["label"],
+                                         detail=cmp["detail"])
+                note = f"{cmp['now']:,.0f} in the last {cmp['window']} days"                     if m.agg == "sum" else                     f"{cmp['now']:,.1f} in the last {cmp['window']} days"
+        spark = None
+        if date:
+            frame, _ = metrics.over_time(prof.df, m, date, prof)
+            if len(frame) > 2:
+                spark = frame.rename(columns={m.verb: "v"})
+        theme.kpi_card(col, m.title(),
+                       f"{value:,.0f}" if (m.agg == "sum" or m.integerish)
+                       else f"{value:,.1f}",
+                       delta=delta, note=note,
+                       spark_df=spark, spark_x="Period", spark_y="v")
+
+
 def kpi_row(prof: pf.Profile, found: list):
     cols = st.columns(4)
     theme.kpi_card(cols[0], "Records", f"{prof.rows:,}",
@@ -273,18 +306,50 @@ def download_row(prof, found, panels, label: str, key: str):
 def page_overview(prof, found, filt):
     theme.band("Overview", f"{prof.source}" + (f" · {prof.sheet}" if prof.sheet else "")
                + (f" · filtered: {filt}" if filt else ""))
-    kpi_row(prof, found)
+
+    overrides = st.session_state.setdefault("_agg_overrides", {})
+    ms = metrics.measures(prof, limit=5, overrides=overrides)
+    metric_row(prof, ms)
+
+    with st.expander("How these numbers are calculated — change any of them", False):
+        st.caption(
+            "Whether a column should be totalled or averaged is a guess from its "
+            "name, and it will sometimes be wrong: staff on duty is a level, "
+            "doses given is a total, and no word list settles that. Correct it "
+            "here and every chart below follows.")
+        for m in ms:
+            if m.col == metrics.RECORDS.col:
+                continue
+            pick = st.radio(
+                m.label, ["sum", "mean"],
+                index=0 if m.agg == "sum" else 1,
+                horizontal=True, key=f"agg_{m.col}",
+                captions=["total across records", "average per record"])
+            if pick != m.agg:
+                overrides[m.col] = pick
+                st.rerun()
+
+    flags = [f for f in found if f.severity == insights.FLAG]
+    if flags:
+        with st.expander(f"⚠ {len(flags)} thing(s) to settle before quoting these "
+                         "figures", False):
+            finding_list(flags, tables=False)
+            st.caption("The Data health page has the rest.")
+
     theme.section("The short version", "computed from your file, not written")
     theme.insight(insights.headline(prof, found))
-    theme.section("What stands out", f"top 6 of {len(found)} findings — the rest "
-                                     "are on the Findings page")
-    finding_list(found, limit=6, tables=False)
 
-    panels = charts.auto_panels(prof, limit=8)
-    theme.section("Charts chosen for this data",
-                  f"{len(panels)} of the columns are worth a picture")
+    panels = charts.dashboard(prof, limit=10)
+    theme.section("Charts", f"{len(panels)} views of your measures — level, "
+                            "split, and what moved")
     render_grid(panels)
     maps_note(prof)
+
+    with st.expander("Distributions and column counts", False):
+        st.caption("What is in each column, one at a time. Useful once, to see "
+                   "the shape of the file.")
+        render_grid(charts.auto_panels(prof, limit=6))
+
     download_row(prof, found, panels, "Overview", "overview")
 
 
