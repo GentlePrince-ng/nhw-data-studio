@@ -563,6 +563,37 @@ def change_by(p: pf.Profile, m, dim: str, date: str | None = None) -> Panel | No
                  "change_by", [m.col, dim, date])
 
 
+def why_nothing(p: pf.Profile) -> str:
+    """Why the dashboard is empty, in one sentence, or "" if it should not be.
+
+    The floor under every explanation. `profiling.describe_shape` names the
+    shapes it can recognise before typing; this runs after, knowing what the
+    charts actually asked for — and so it cannot be out of step with them.
+    Returning "" when there *are* measures and dimensions is deliberate: an
+    empty page in that case is a bug in the tool, not a fact about the file,
+    and it should stay visible as one.
+    """
+    from . import metrics
+    ms = [m for m in metrics.measures(p, limit=4) if m.col != metrics.RECORDS.col]
+    dims = metrics.dimensions(p, limit=4)
+    if ms and dims:
+        return ""
+    if p.rows < 5:
+        return (f"Only {p.rows} row(s) of data. There is nothing to compare or "
+                "total yet — the table below is the whole file.")
+    if not ms and not dims:
+        return ("Nothing here charts: no column holds numbers to total, and no "
+                "column has few enough repeated values to compare. The table "
+                "below and the **Brief** both still work on it.")
+    if not ms:
+        return ("No column holds numbers to total or average, so there is "
+                "nothing to plot against the categories in this file. Counts "
+                "of records are on the Columns page.")
+    return ("No column has few enough repeated values to break the numbers "
+            "down by — every one is either a single value or all different. "
+            "The numbers themselves are on the Columns page.")
+
+
 def dashboard(p: pf.Profile, limit: int = 10) -> list:
     """The front page: metrics over time, then broken down, then what moved.
 

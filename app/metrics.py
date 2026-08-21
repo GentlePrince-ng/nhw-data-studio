@@ -218,10 +218,32 @@ def _sliceable(prof: pf.Profile, c) -> bool:
     return float(vals.str.len().mean()) <= 28
 
 
+def year_column(prof: pf.Profile) -> str | None:
+    """A numeric column of years, which is a time axis rather than a number.
+
+    Long-format indicator tables — Region / Indicator / Year / Value — are the
+    commonest shape in health data and they carry no date column at all. The
+    year sat in a numeric column, so it was neither a dimension nor a date, and
+    an 800-row indicator table produced no charts whatsoever.
+    """
+    for name, c in prof.columns.items():
+        if c.role != pf.NUMERIC or pf.is_system(name):
+            continue
+        vals = pd.to_numeric(prof.df[name], errors="coerce").dropna()
+        if vals.empty or not 3 <= c.unique <= 40:
+            continue
+        if (vals % 1 == 0).all() and vals.between(1900, 2100).all():
+            return name
+    return None
+
+
 def dimensions(prof: pf.Profile, limit: int = 6) -> list:
     """Columns worth slicing by — few enough levels to compare at a glance."""
     dims = [c for c in prof.headline_cats(limit=limit * 4)
             if _sliceable(prof, c) and not pf.is_system(c.name)]
+    year = year_column(prof)
+    if year and year not in [d.name for d in dims]:
+        dims.insert(0, prof.columns[year])
     place = prof.best_geo()
     if place and place not in [d.name for d in dims]:
         col = prof.columns.get(place)
@@ -283,7 +305,7 @@ def ordinal_order(values) -> list:
         return []
     parsed, stray = [], 0
     for lab in labels:
-        m = re.match(r"^\s*([A-Za-z]{1,10})?\s*[-_ ]?(\d{1,4})\s*$", lab)
+        m = re.match(r"^\s*([A-Za-z]{1,10})?\s*[-_ ]?(\d{1,4})(?:\.0)?\s*$", lab)
         word = (m.group(1) or "").lower() if m else ""
         if not m or (word and word not in SEQ_WORDS):
             stray += 1
@@ -330,7 +352,7 @@ def label_column(prof: pf.Profile) -> str | None:
         if avg_len > 120 or vals.str.startswith(("http://", "https://")).mean() > 0.5:
             continue
         distinct = c.unique / max(c.filled, 1)
-        if distinct < 0.3:                    # that is a dimension, not a label
+        if distinct < 0.3 and c.unique <= 25:  # that is a dimension, not a label
             continue
         # A column called headline or title beats one called unique_id, even
         # when both are near-unique and early in the sheet: "top 15 articles"

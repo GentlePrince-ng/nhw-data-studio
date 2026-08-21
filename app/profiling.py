@@ -238,11 +238,26 @@ def file_key(name: str, data: bytes) -> str:
     return name + ":" + hashlib.sha1(data).hexdigest()[:16]
 
 
+UNREADABLE = ("Excel could not open this workbook — the file's formatting "
+              "section is invalid, which some export tools produce. Open it in "
+              "Excel and use Save As to write a fresh .xlsx, then upload that.")
+
+
 def sheet_names(data: bytes, name: str) -> list:
+    """The sheet list, or [] when the workbook cannot be opened at all.
+
+    A STATcompiler export raised deep inside openpyxl's stylesheet parser. The
+    sidebar asks for the sheet list before anything else, so an exception here
+    took out the whole page — and a file the tool cannot open should still get
+    a sentence saying so.
+    """
     if name.lower().endswith((".csv", ".txt", ".tsv")):
         return []
-    with pd.ExcelFile(io.BytesIO(data)) as xl:
-        return list(xl.sheet_names)
+    try:
+        with pd.ExcelFile(io.BytesIO(data)) as xl:
+            return list(xl.sheet_names)
+    except Exception:                    # noqa: BLE001 - any parser failure
+        return []
 
 
 def split_comments(data: bytes):
@@ -417,6 +432,8 @@ def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
     low = name.lower()
     if low.endswith(".xls"):
         raise ValueError("Old .xls format — open it in Excel and Save As .xlsx")
+    if not low.endswith((".csv", ".txt", ".tsv")) and not sheet_names(data, name):
+        raise ValueError(UNREADABLE)
     if low.endswith((".csv", ".txt", ".tsv")):
         body, notes = split_comments(data)
         sep = "\t" if low.endswith(".tsv") else sniff_sep(body)

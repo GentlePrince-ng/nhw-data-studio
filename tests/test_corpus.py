@@ -22,11 +22,12 @@ Outcomes, in order of seriousness:
 
   ERROR  — an exception. Always a bug in the tool: a file that cannot be read
            should degrade to a thin page, never a traceback.
-  EMPTY  — read, but zero charts and no explanation. This is the one to look at:
-           it is where a silent misread hides, like the 8,750-rows-two-columns
-           GA4 read.
-  NOTTABLE — read, nothing to analyse, and the tool SAYS WHY on the page: a form
-           definition, a cover sheet, a pivot layout. A good outcome.
+  EMPTY  — zero charts and *nothing said about why*. This is the one to look
+           at: it is where a silent misread hides, like the
+           8,750-rows-two-columns GA4 read. There should be none of these.
+  NOTTABLE — nothing to chart, and the tool says why on the page: a form
+           definition, a cover sheet, a pivot layout, a list with no numbers,
+           a workbook Excel cannot open. A good outcome.
   SLOW   — over the threshold. A tool sold as "under five minutes" has to be.
   OK     — rows, columns and at least one chart.
 
@@ -124,14 +125,24 @@ def exercise(path: Path) -> dict:
                 break
         if broken:
             row.update(status="ERROR", detail="rule crashed: " + broken[0][:80])
-        elif prof.shape_note:
-            # The tool knows what this file is and says so — a form definition,
-            # a cover page, a pivot-style layout. Not a failure.
-            row.update(status="NOTTABLE", detail=prof.shape_note[:90])
-        elif prof.rows == 0:
-            row.update(status="EMPTY", detail="no data rows")
         elif row["charts"] == 0:
-            row.update(status="EMPTY", detail="read but nothing to chart")
+            # The page must say why it is empty. Either profiling recognised
+            # the shape, or charts.why_nothing names what was missing. Only a
+            # file that gets neither is worth investigating: that is where a
+            # silent misread hides.
+            said = prof.shape_note or charts.why_nothing(prof)
+            if said:
+                row.update(status="NOTTABLE", detail=said[:100])
+            else:
+                row.update(status="EMPTY",
+                           detail="nothing to chart, and nothing said about why")
+        elif prof.shape_note:
+            row.update(status="NOTTABLE", detail=prof.shape_note[:90])
+    except ValueError as exc:
+        # A ValueError from build is a deliberate refusal with a sentence for
+        # the reader — an .xls, a workbook openpyxl cannot parse. That is the
+        # designed outcome, not a crash.
+        row.update(status="NOTTABLE", detail=str(exc)[:110])
     except Exception as exc:                        # noqa: BLE001 - that is the point
         row.update(status="ERROR",
                    detail=f"{type(exc).__name__}: {str(exc)[:120]}")

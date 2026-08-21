@@ -622,6 +622,70 @@ def main() -> int:
     if not ok:
         fails.append("row-label column dropped from a wide table")
 
+    print("")
+    print("--- long-format indicator tables, and the explanation floor ---")
+    # Region / Indicator / Year / Value is the commonest shape in health data
+    # and it carries no date column at all. The year sat in a numeric column,
+    # so it was neither a dimension nor a date, and the file drew nothing.
+    ind = pd.DataFrame({
+        "Region": ["Nigeria"] * 240,
+        "Indicator": [f"Indicator {i % 40}" for i in range(240)],
+        "Year": [2015 + (i // 40) for i in range(240)],
+        "Value": rng.normal(50, 12, 240).round(1),
+    })
+    prof = pf.build(ind.to_csv(index=False).encode(), "indicators.csv")
+    panels = charts.dashboard(prof, limit=6)
+    kinds = [q.kind for q in panels if q.chart is not None]
+    ok = "sequence_trend" in kinds and "top_items" in kinds
+    print(f"  {'PASS' if ok else 'FAIL'}  a long-format indicator table gets a "
+          f"trend and a ranking  ({kinds})")
+    if not ok:
+        fails.append("long-format indicator table not charted")
+
+    # The floor: no blank page anywhere. Anything the shape notes do not catch
+    # before typing, why_nothing must catch after.
+    cases = {
+        "a two-row file": pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}),
+        "one column of links": pd.DataFrame(
+            {"Extracted Links": [f"https://example.org/{i}" for i in range(24)]}),
+        "all columns all-different": pd.DataFrame(
+            {"Code": [f"C{i}" for i in range(44)],
+             "Definition": [f"Definition number {i}" for i in range(44)],
+             "When to use": [f"Use it when {i}" for i in range(44)]}),
+    }
+    for label, frame in cases.items():
+        prof = pf.build(frame.to_csv(index=False).encode(), "x.csv")
+        drawn = [q for q in charts.dashboard(prof, limit=6) if q.chart is not None]
+        said = prof.shape_note or charts.why_nothing(prof)
+        ok = bool(drawn) or bool(said)
+        print(f"  {'PASS' if ok else 'FAIL'}  {label} is charted or explained"
+              f"  ({len(drawn)} charts, {'explained' if said else 'SILENT'})")
+        if not ok:
+            fails.append(f"blank page with no explanation: {label}")
+
+    # why_nothing must stay silent when there ARE measures and dimensions: an
+    # empty page in that case is a bug in the tool, and must not be papered over.
+    good = pd.DataFrame({"state": rng.choice(["Kano", "Lagos"], 80),
+                         "cases": rng.integers(1, 40, 80)})
+    prof = pf.build(good.to_csv(index=False).encode(), "good.csv")
+    ok = charts.why_nothing(prof) == ""
+    print(f"  {'PASS' if ok else 'FAIL'}  a chartable file gets no excuse text")
+    if not ok:
+        fails.append("why_nothing fired on a chartable file")
+
+    # A workbook Excel itself cannot parse must still get a sentence.
+    try:
+        pf.build(b"PK\x03\x04 not really a workbook", "broken.xlsx")
+        ok, why = False, "no error raised"
+    except ValueError as exc:
+        ok, why = "Save As" in str(exc), str(exc)[:40]
+    except Exception as exc:                                  # noqa: BLE001
+        ok, why = False, f"{type(exc).__name__} instead of a message"
+    print(f"  {'PASS' if ok else 'FAIL'}  an unopenable workbook gets a "
+          f"sentence, not a traceback  ({why!r})")
+    if not ok:
+        fails.append("unopenable workbook raised the wrong way")
+
     print("\n--- size ---")
     n = 100_000
     big = pd.DataFrame({

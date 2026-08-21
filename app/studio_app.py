@@ -358,9 +358,17 @@ def page_overview(prof, found, filt):
     theme.insight(insights.headline(prof, found))
 
     panels = charts.dashboard(prof, limit=10)
-    theme.section("Charts", f"{len(panels)} views of your measures — level, "
-                            "split, and what moved")
-    render_grid(panels)
+    if not panels:
+        # Never a blank space where charts should be. describe_shape catches
+        # the shapes it can name before typing; this catches everything else,
+        # and it is computed from what the charts actually asked for.
+        theme.section("Charts", "nothing to chart in this file")
+        st.info(charts.why_nothing(prof)
+                or "No charts could be built from this file.")
+    else:
+        theme.section("Charts", f"{len(panels)} views of your measures — level, "
+                                "split, and what moved")
+        render_grid(panels)
     maps_note(prof)
 
     with st.expander("Distributions and column counts", False):
