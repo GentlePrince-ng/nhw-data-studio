@@ -65,15 +65,13 @@ def main() -> int:
     # 98/99/999 are ordinary values in a web metric, so a sentinel has to be an
     # outlier as well as a spike: a pageviews column with eight 99s was being
     # reported as don't-know/refused.
-    import io as _io
     _rng = np.random.default_rng(3)
     _views = list(_rng.integers(100, 9000, 300)) + [99] * 8 + [98] * 5
-    _buf = _io.BytesIO()
-    with pd.ExcelWriter(_buf, engine='xlsxwriter') as _xw:
-        pd.DataFrame({'Total entries': _views,
-                      'Focus Area': ['HSS', 'MNCH'] * (len(_views) // 2)
-                      }).to_excel(_xw, index=False)
-    _web = pf.build(_buf.getvalue(), 'web.xlsx')
+    _web_df = pd.DataFrame({
+        'Total entries': _views,
+        'Focus Area': [('HSS' if i % 2 else 'MNCH') for i in range(len(_views))],
+    })
+    _web = pf.build(_web_df.to_csv(index=False).encode(), 'web.csv')
     check('ordinary web-metric values are not read as survey codes',
           not _web.columns['Total entries'].sentinel_hits,
           str(_web.columns['Total entries'].sentinel_hits))
