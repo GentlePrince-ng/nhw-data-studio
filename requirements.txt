@@ -3,7 +3,12 @@
 # a Streamlit Community Cloud rebuild takes a working app down weeks after the
 # last commit, so the awkward ones are pinned rather than left open.
 
-streamlit>=1.36,<2
+# Upper bounds on every direct dependency, deliberately. An unpinned major is
+# how a deployed app that has not been touched in weeks dies on a rebuild —
+# GLIDE went down that way when a transitive starlette release landed. Verified
+# working here: streamlit 1.60, altair 6.2, pandas 3.0.5, numpy 2.5, scipy 1.18,
+# vl-convert 1.9.
+streamlit>=1.40,<2
 altair>=5.3,<7
 
 # The typing pass handles both pandas generations: 2.x reads text as object,
@@ -20,7 +25,7 @@ xlsxwriter>=3.1        # writing the Excel download
 # Rendering charts to SVG/PNG for the offline HTML report. Pure-Rust wheel, no
 # system dependencies, no browser. Without it the app still runs and the report
 # still builds — it falls back to tables and says so on the page.
-vl-convert-python>=1.6
+vl-convert-python>=1.6,<2
 
 # NOT runtime dependencies. The Nigeria boundary files in static/ are vendored
 # GeoJSON, read with the standard-library json module. geopandas and shapely are

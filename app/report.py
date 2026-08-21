@@ -227,7 +227,11 @@ def html_report(prof, findings, panels, title: str = "",
         "file. Percentages are stated against the number of records that "
         "answered the question concerned, which is printed under each chart, "
         "not against the full sample. Correlations are associations, not "
-        "causes.</p>")
+        "causes.")
+    if any(getattr(p, "kind", "") == "map" for p in panels):
+        from . import geo
+        body.append("<br>" + html.escape(geo.ATTRIBUTION))
+    body.append("</p>")
     return ("".join(head + body) + "</div></body></html>").encode("utf-8")
 
 

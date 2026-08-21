@@ -505,6 +505,10 @@ this browser session and goes when you close the tab.
             st.markdown("Accepts `.xlsx`, `.xlsm`, `.csv`, `.tsv`. Multi-sheet "
                         "workbooks let you pick the sheet.")
         with st.container(border=True):
+            st.markdown("#### Maps")
+            st.caption(geo.ATTRIBUTION + " Nigeria state and LGA boundaries, "
+                       "shown where your data has a place column.")
+        with st.container(border=True):
             st.markdown("#### Five pages")
             for name, desc in [
                     ("Overview", "the read, the KPIs, the chosen charts"),

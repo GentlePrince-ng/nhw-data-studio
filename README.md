@@ -10,8 +10,8 @@ streamlit run app/studio_app.py
 
 Then drag any `.xlsx` / `.xlsm` / `.csv` / `.tsv` into the sidebar.
 
-Maps need one extra step, because the Nigeria boundary files are not in this
-repository — see [The maps](#the-maps). Everything else works without them.
+The Nigeria state and LGA maps work out of the box — boundaries are included
+under CC BY 4.0, see [The maps](#the-maps).
 
 To see it work before pointing it at real data:
 
@@ -66,9 +66,22 @@ question concerned, and that denominator is printed under the chart.
 
 ## The maps
 
-**The boundary files are not in this repository.** They are derived from a
-national administrative layer whose onward licensing is not this project's to
-decide, so you build them once from your own source:
+37 states and the FCT, and all 774 LGAs, are committed in `static/` — so the
+maps work on a fresh clone with nothing to set up.
+
+> Boundary data from **geoBoundaries** (gbOpen), **CC BY 4.0** — Runfola, D.
+> et al. (2020) *geoBoundaries: A global database of political administrative
+> boundaries.* PLoS ONE 15(4): e0231866.
+
+Provenance, the build command, and the checks the build had to pass are in
+[`static/BOUNDARIES.md`](static/BOUNDARIES.md). Two points worth repeating here:
+geoBoundaries' LGA layer does not name its parent state, so each LGA's state
+comes from a point-in-polygon join against the state layer; and that join was
+verified against the official LGA count of **every** state — Kano 44, Katsina 34,
+FCT 6 — all 37 correct, 774 total.
+
+To rebuild from a different source (the GRID3 operational layer, for instance,
+which is what Nigerian health programmes use):
 
 ```bash
 pip install geopandas shapely
@@ -76,18 +89,10 @@ python static/build_boundaries.py path/to/lga_boundaries.geojson
 # or drop the layer into static/source/ (git-ignored) and run it bare
 ```
 
-That writes `static/nigeria_states.geojson` (37 polygons, 121 KB) and
-`static/nigeria_lgas.geojson` (774 polygons, 635 KB) — dissolved, simplified and
-rounded to 3 decimal places. The source needs one polygon per LGA plus an LGA
-name and a state name; the script recognises the field names used by GRID3,
-geoBoundaries, HDX/OCHA and GADM, and prints what it found. See its docstring
-for where to get a layer, and prefer the operational (GRID3) one: global
-datasets disagree with NPHCDA on LGA counts.
-
-**Without the files the app runs normally and draws no maps**, saying so under
-the charts rather than leaving you to wonder. `geopandas` and `shapely` are
-build-time only and deliberately absent from `requirements.txt`; the app itself
-reads the GeoJSON with the standard library.
+`geopandas` and `shapely` are build-time only and deliberately absent from
+`requirements.txt` — the app reads the GeoJSON with the standard library, and if
+the files are ever missing it runs normally and says under the charts why there
+is no map.
 
 Joining a spreadsheet to a boundary file is where a map goes wrong, so:
 

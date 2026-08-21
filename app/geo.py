@@ -30,6 +30,13 @@ import pandas as pd
 from . import theme
 
 STATIC = Path(__file__).resolve().parents[1] / "static"
+
+# CC BY 4.0 requires attribution wherever the work appears, so this string is
+# shown in the app and printed into every exported report — not left in the
+# repository where a reader of the output would never see it.
+# Full provenance and the build command: static/BOUNDARIES.md
+ATTRIBUTION = ("Boundary data from geoBoundaries (gbOpen), CC BY 4.0 — "
+               "Runfola et al. (2020), PLoS ONE 15(4): e0231866.")
 STATES_FILE = STATIC / "nigeria_states.geojson"
 LGAS_FILE = STATIC / "nigeria_lgas.geojson"
 
@@ -40,6 +47,10 @@ STATE_ALIASES = {
     "fctabuja": "federal capital territory",
     "abujafct": "federal capital territory",
     "fedcapitalterritory": "federal capital territory",
+    # geoBoundaries writes the FCT this way; without it the capital is the one
+    # place on the map that never matches.
+    "abuja federal capital territory": "federal capital territory",
+    "abujafederalcapitalterritory": "federal capital territory",
     "nassarawa": "nasarawa",
     "nassawara": "nasarawa",
     "akwaibom": "akwa ibom",
