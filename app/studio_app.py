@@ -392,7 +392,12 @@ def page_health(prof, found, filt):
     theme.section(tt.title, tt.note)
     st.dataframe(tt.table, width="stretch", hide_index=True, height=380)
     with st.expander("Duplicate rows, in full", False):
-        dup = prof.df[prof.df.duplicated(keep=False)]
+        # .to_numpy(): a boolean *Series* is aligned on the index, and a user
+        # hit "Unalignable boolean Series provided as indexer" here on their own
+        # file — a frame whose index does not match what duplicated() returned.
+        # A plain boolean array cannot misalign, so the failure mode is gone
+        # rather than merely unreproduced.
+        dup = prof.df.loc[prof.df.duplicated(keep=False).to_numpy()]
         if len(dup):
             st.caption(f"{len(dup):,} rows are part of a duplicate group.")
             st.dataframe(dup.head(500), width="stretch")

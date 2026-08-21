@@ -44,7 +44,12 @@ class Panel:
             # Streamlit's Altair handling cannot carry GeoJSON.
             (theme.geo_chart if self.kind == "map" else theme.chart)(self.chart)
         if self.table is not None and (show_table or self.chart is None):
-            st.dataframe(self.table, width="stretch", hide_index=True)
+            # Column labels forced to strings: a crosstab of a numeric-looking
+            # category gives a frame with mixed-type column names, which
+            # Streamlit warns about on every render and converts anyway.
+            t = self.table.copy()
+            t.columns = [str(c) for c in t.columns]
+            st.dataframe(t, width="stretch", hide_index=True)
 
 
 def _top_n(vc: pd.Series, n: int = TOP_N) -> pd.Series:

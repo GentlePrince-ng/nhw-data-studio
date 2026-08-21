@@ -642,7 +642,9 @@ def geo_chart(ch) -> None:
                 if k in spec}
         view["data"] = resolve(top)
         spec["layer"] = [view]
-    st.vega_lite_chart(spec, use_container_width=False, theme=None)
+    # width="content": use_container_width is deprecated after 2025-12-31 and
+    # was filling the deployment logs with the warning on every map render.
+    st.vega_lite_chart(spec, width="content", theme=None)
 
 
 def spark(df, x: str, y: str, colour: str = GREEN_DEEP, height: int = 34):
