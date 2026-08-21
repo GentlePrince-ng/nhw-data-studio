@@ -141,6 +141,26 @@ takes uploads of health data, it ships with an access gate that **fails closed**
 A shared code says *someone was given this*, not *who*. If per-person access
 matters, the hashed-roster pattern from the NHW dashboard belongs here instead.
 
+### The two secrets
+
+Both live in *Settings* → *Secrets* on share.streamlit.io, in one TOML block:
+
+```toml
+ACCESS_CODE = "choose-something-not-guessable"
+ANTHROPIC_API_KEY = "sk-ant-..."          # optional: only the Written brief page
+```
+
+`ACCESS_CODE` is required — without it nobody gets in. `ANTHROPIC_API_KEY` is
+optional: leave it out and every page works except the Written brief, which says
+so on itself. Streamlit does not export secrets into the environment and the
+Anthropic SDK only reads the environment, so `page_brief` copies it across at
+runtime; that indirection is why a key in `secrets.toml` works at all.
+
+Prefer a key created inside an **organisation workspace** with a spend limit over
+a personal one. A key in a workspace can be revoked by an admin, bills to the
+organisation, and its usage is attributable to this tool rather than mixed in
+with everything else you have running.
+
 ## Size
 
 Built for the 10,000-row exports this was commissioned for, comfortable to a few
