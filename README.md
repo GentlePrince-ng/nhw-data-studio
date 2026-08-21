@@ -18,8 +18,12 @@ To see it work before pointing it at real data:
 ```bash
 python samples/make_sample.py     # a 10,180-row Kobo-style survey with planted defects
 python tests/test_pipeline.py     # read -> type -> analyse -> chart -> export, asserted
-python tests/test_edges.py        # 14 awkward uploads, plus 100,000 rows
+python tests/test_edges.py        # every awkward upload we have met, + 100,000 rows
 ```
+
+Both exit non-zero on failure, so `python tests/test_edges.py && echo ok` is the
+check — not reading the output, which is how two red suites once got reported as
+green.
 
 On the sample that runs in about **six seconds** end to end — including drawing
 both maps and building the downloadable report.
@@ -179,6 +183,47 @@ a personal one. A key in a workspace can be revoked by an admin, bills to the
 organisation, and its usage is attributable to this tool rather than mixed in
 with everything else you have running.
 
+## Testing it against real files
+
+`tests/test_pipeline.py` and `tests/test_edges.py` are the committed suites and
+run anywhere. `tests/test_corpus.py` is different: it points the whole pipeline
+at a folder of **real** exports and reports what breaks.
+
+```bash
+python tests/test_corpus.py                        # 40 files, sampled across folders
+python tests/test_corpus.py --limit 220 --max-mb 20
+python tests/test_corpus.py --only glide           # substring filter on the path
+python tests/test_corpus.py --baseline samples/_corpus_last_run.json
+```
+
+It is **local only and deliberately not part of CI** — CI has no access to the
+archive and should not have. No data is committed and none is printed: the
+report carries file names, shapes, timings and error types, never a cell value.
+The run log it writes is git-ignored, because file names alone can identify
+people.
+
+Outcomes, worst first:
+
+| | meaning |
+|---|---|
+| `ERROR` | an exception. Always a tool bug: an unreadable file should degrade to a thin page, never a traceback. |
+| `EMPTY` | zero charts **and nothing said about why**. Where a silent misread hides. There should be none. |
+| `NOTTABLE` | nothing to chart, and the page says why — a form definition, a cover sheet, a list with no numbers. A good outcome. |
+| `SLOW` | over 25s. A tool sold as "under five minutes" has to be. |
+| `OK` | rows, columns, and at least one chart. |
+
+Why it exists: every serious bug in this tool was found by pointing it at one
+real file. A title row above the table. A GA4 comment block that made the
+delimiter a space. A sheet that was the same records as another. A phone number
+reported as an average. A header row that lost to the first row of data, so a
+trainee's name became a column heading. The fixtures in `test_edges.py` were
+each written *after* the discovery, and they only protect against what has
+already been seen — this is how the next shape gets found by a command instead
+of by a colleague.
+
+Last full run, 220 files across the archive: **161 charted, 59 explained, 0
+empty, 0 errors, 0 slow.**
+
 ## Size
 
 Built for the 10,000-row exports this was commissioned for, comfortable to a few
@@ -211,6 +256,7 @@ app/
 static/           Poppins, the logo, the two boundary files + build_boundaries.py
 samples/          generator + a sample workbook, report and workbook
 tests/            end-to-end assertions over the sample, plus awkward uploads
+                  (test_corpus.py is the local-only harness, see below)
 ```
 
 `theme.py` is the same brand system as the Impact Observatory and GLIDE
