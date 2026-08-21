@@ -82,9 +82,22 @@ TIME_PART_WORDS = ("year", "yr", "month", "mth", "week", "wk", "day", "quarter",
                    "qtr", "fy", "epoch", "timestamp", "hour", "minute")
 
 
+# Tokens that carry no meaning of their own, so "week number" is still a week.
+FILLER = {"of", "the", "in", "a", "number", "no", "num", "nos", "name", "id",
+          "index", "period", "label", "value", "fiscal", "financial",
+          "calendar", "reporting", "survey", "data"}
+
+
 def _is_time_part(name) -> bool:
-    low = re.sub(r"[^a-z ]+", " ", str(name).lower())
-    return bool(set(low.split()) & set(TIME_PART_WORDS))
+    """True only when the name is *entirely* a time label.
+
+    A containment test was too greedy: `visits_last_year` contains "year", so a
+    genuine count of visits stopped being a measure. The whole name has to be
+    the time label — "Year", "Fiscal year", "week number" — for the column to
+    be a period marker rather than a quantity.
+    """
+    toks = set(re.sub(r"[^a-z ]+", " ", str(name).lower()).split()) - FILLER
+    return bool(toks) and toks <= set(TIME_PART_WORDS)
 
 
 def _is_coordinate(name) -> bool:
