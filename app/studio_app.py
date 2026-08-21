@@ -316,8 +316,14 @@ def download_row(prof, found, panels, label: str, key: str):
 def page_overview(prof, found, filt):
     theme.band("Overview", f"{prof.source}" + (f" · {prof.sheet}" if prof.sheet else "")
                + (f" · filtered: {filt}" if filt else ""))
+    if prof.shape_note:
+        st.warning(prof.shape_note)
     if prof.sheet_note:
         st.info(prof.sheet_note)
+    if prof.source_notes:
+        with st.expander("What the file says about itself", False):
+            for line in prof.source_notes[:12]:
+                st.caption(line)
 
     overrides = st.session_state.setdefault("_agg_overrides", {})
     ms = metrics.measures(prof, limit=5, overrides=overrides)

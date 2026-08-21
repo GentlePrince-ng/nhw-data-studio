@@ -429,6 +429,43 @@ def main() -> int:
     print("\n--- hand-maintained tracker (title rows, one sheet per week) ---")
     tracker_checks()
 
+    print("")
+    print("--- files that were never datasets ---")
+    # The corpus turned these up repeatedly: a document written into a grid. No
+    # numbers, no repeated categories, so nothing to chart. The tool has to say
+    # why rather than show a blank page, so the note is what is asserted here.
+    prose = pd.DataFrame({
+        "Section": [f"Section {i}: what this covers" for i in range(1, 11)],
+        "Details": [f"A paragraph of prose unique to row {i}." for i in range(10)],
+        "Data Sources": [f"Source list {i}, cited in full." for i in range(10)],
+    })
+    for label, as_book in [("a written outline in a grid is explained", False),
+                           ("the same outline as a spreadsheet", True)]:
+        if as_book:
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+                prose.to_excel(xw, index=False)
+            prof = pf.build(buf.getvalue(), "outline.xlsx")
+        else:
+            prof = pf.build(prose.to_csv(index=False).encode(), "outline.csv")
+        note, drawn = prof.shape_note, len(charts.dashboard(prof, limit=6))
+        ok = bool(note) and "free text" in note and drawn == 0
+        print(f"  {'PASS' if ok else 'FAIL'}  {label}"
+              f"  (charts={drawn}, note={'yes' if note else 'NONE'})")
+        if not ok:
+            fails.append(label)
+
+    # ...and the same rule must stay silent on a real dataset, or every upload
+    # gets told it is not a dataset.
+    real = pd.DataFrame({"state": rng.choice(["Kano", "Lagos"], 60),
+                         "cases": rng.integers(1, 40, 60)})
+    quiet = pf.build(real.to_csv(index=False).encode(), "real.csv")
+    ok = not quiet.shape_note
+    print(f"  {'PASS' if ok else 'FAIL'}  a genuine dataset gets no shape note")
+    if not ok:
+        fails.append("shape note fired on a genuine dataset: "
+                     + quiet.shape_note[:60])
+
     print("\n--- size ---")
     n = 100_000
     big = pd.DataFrame({

@@ -149,6 +149,8 @@ class Profile:
     sheets_skipped: list = field(default_factory=list)
     total_rows_dropped: int = 0
     sheet_note: str = ""
+    source_notes: list = field(default_factory=list)
+    shape_note: str = ""
 
     def by_role(self, *roles: str) -> list:
         return [c for c in self.columns.values() if c.role in roles]
@@ -240,6 +242,63 @@ def sheet_names(data: bytes, name: str) -> list:
         return list(xl.sheet_names)
 
 
+def split_comments(data: bytes):
+    """Peel off a leading block of `#` comment lines, keeping them as notes.
+
+    GA4, Search Console, YouTube Analytics and Matomo all export a CSV that
+    opens with a metadata block:
+
+        # ----------------------------------------
+        # Pages and screens: Page path and screen class
+        # Account: Nigeria Health Watch
+        # Start date: 20230101
+
+    Left in place it is not merely noise. pandas sniffs the delimiter from the
+    first line, finds no comma in `# ------`, splits on spaces instead — and an
+    8,801-row eight-column export read as 8,750 rows and TWO columns. Only the
+    leading run is removed, so a `#` inside real data is untouched, and the lines
+    are kept because they carry the property and the date range: exactly the
+    provenance a chart should be able to cite.
+    """
+    notes, idx, n = [], 0, len(data)
+    while idx < n:
+        end = data.find(b"\n", idx)
+        if end == -1:
+            end = n
+        line = data[idx:end].strip()
+        if not line.startswith(b"#"):
+            break
+        text = line.lstrip(b"#").strip().decode("utf-8", "replace")
+        if text and set(text) != {"-"}:
+            notes.append(text)
+        idx = end + 1
+    return data[idx:], notes
+
+
+def sniff_sep(body: bytes) -> str:
+    """Pick the delimiter by counting candidates across the first few lines.
+
+    `sep=None` asks pandas to sniff, and it sniffs the first line only — the
+    wrong line whenever a file opens with anything unusual. Counting across
+    several lines and preferring a consistent count is cheaper and harder to
+    fool: a comma inside prose varies line to line, a delimiter does not.
+    """
+    head = body[:16000].decode("utf-8", "replace").splitlines()
+    lines = [ln for ln in head if ln.strip()][:8]
+    if not lines:
+        return ","
+    best, best_score = ",", -1.0
+    for cand in (",", "\t", ";", "|"):
+        counts = [ln.count(cand) for ln in lines]
+        if min(counts) < 1:
+            continue
+        consistency = 1.0 - (max(counts) - min(counts)) / max(max(counts), 1)
+        score = min(counts) * (0.5 + consistency)
+        if score > best_score:
+            best, best_score = cand, score
+    return best
+
+
 def find_header(raw: pd.DataFrame, look: int = 15) -> int:
     """Which row holds the column names.
 
@@ -292,14 +351,17 @@ def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
     if low.endswith(".xls"):
         raise ValueError("Old .xls format — open it in Excel and Save As .xlsx")
     if low.endswith((".csv", ".txt", ".tsv")):
-        sep = "\t" if low.endswith(".tsv") else None
+        body, notes = split_comments(data)
+        sep = "\t" if low.endswith(".tsv") else sniff_sep(body)
         last = None
         for enc in ("utf-8-sig", "cp1252", "latin-1"):
             try:
-                return _apply_header(pd.read_csv(
-                    io.BytesIO(data), sep=sep, engine="python", encoding=enc,
+                frame = _apply_header(pd.read_csv(
+                    io.BytesIO(body), sep=sep, engine="python", encoding=enc,
                     na_values=NA_STRINGS, nrows=nrows, header=None,
                     on_bad_lines="skip"))
+                frame.attrs["notes"] = notes
+                return frame
             except (UnicodeDecodeError, LookupError) as exc:
                 last = exc
         raise ValueError("Could not decode this CSV — try saving it as .xlsx") from last
@@ -918,6 +980,71 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     return combined, keep, skipped
 
 
+XLSFORM_SHEETS = {"survey", "choices", "settings"}
+
+
+def looks_like_xlsform(sheets: list, columns) -> bool:
+    """An XLSForm is a questionnaire definition, not data.
+
+    NHW has hundreds of these beside their exports, and stacking `survey` with
+    `choices` produced an 11,339-row "dataset" of form logic — rows about
+    questions rather than answers. Recognising it is kinder than charting it.
+    """
+    have = {str(s).strip().lower() for s in (sheets or [])}
+    if len(XLSFORM_SHEETS & have) >= 2:
+        return True
+    # `columns or []` is a truth test, and a pandas Index raises on one — which
+    # sent the whole diagnosis into its except branch, so the files that most
+    # needed an explanation silently got none.
+    cols = {str(c).strip().lower().split("::")[0]
+            for c in (list(columns) if columns is not None else [])}
+    return {"type", "name"} <= cols and bool(cols & {"label", "hint",
+                                                     "relevant", "appearance"})
+
+
+def describe_shape(prof, sheets: list) -> str:
+    """A sentence explaining why a file has nothing to analyse, or "".
+
+    An empty page is the worst outcome: the reader cannot tell a broken tool
+    from a file that was never a table. Every case here came out of running the
+    corpus — a pivot-style sheet with values scattered across cells, a form
+    definition, a report preamble with no table under it.
+    """
+    usable = [c for c in prof.columns.values() if c.role in ANALYSABLE]
+    if looks_like_xlsform(sheets, prof.df.columns):
+        return ("This looks like an **XLSForm questionnaire definition** — the "
+                "survey/choices/settings sheets that define a form, not the "
+                "answers people gave. There is nothing to analyse here; upload "
+                "the data export from Kobo instead.")
+    if len(prof.columns) == 0 or prof.rows == 0:
+        return ("No table was found in this sheet. It may be a pivot-style "
+                "layout with values scattered across cells, or a cover page. "
+                "The tool needs one row per record and one column per field.")
+    if not usable:
+        return ("This sheet has no analysable columns — every column is empty, "
+                "holds a single repeated value, or is free text. It may be a "
+                "cover page, a notes sheet, or a report preamble.")
+    counted = [c for c in usable
+               if c.role in (CATEGORICAL, BINARY, GEO) and c.filled
+               and c.unique < max(2, c.filled * 0.9)]
+    if not counted and not [c for c in usable if c.role in (NUMERIC, DATETIME)]:
+        # A written document laid out in a grid: an outline, a theory of change,
+        # a gaps-and-questions table. Every cell is distinct prose, so there is
+        # nothing to count and nothing to total. Charting it would produce a row
+        # of bars all of height one.
+        return ("Every column here holds distinct free text, with no numbers "
+                "and no repeated categories — this reads as a written document "
+                "laid out in a grid (an outline, a plan, a set of notes) rather "
+                "than a dataset. There is nothing to count or total. The "
+                "**Brief** can still summarise it, and the table below shows it "
+                "in full.")
+    if len(prof.columns) <= 2 and prof.rows < 15:
+        return ("This looks like a preamble rather than a data table: a couple "
+                "of columns and a handful of rows. If the export has the table "
+                "on another sheet, pick it in the sidebar.")
+    return ""
+
+
 def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Profile:
     """Upload bytes to a fully typed Profile. The one entry point the app calls."""
     joined, used, skipped = (None, [], [])
@@ -950,6 +1077,12 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
                    truncated=truncated)
     prof.sheets_used, prof.sheets_skipped = used, skipped
     prof.total_rows_dropped, prof.sheet_note = totals, note
+    # Metadata the export carried at the top of the file: property, date range.
+    prof.source_notes = list(getattr(raw, "attrs", {}).get("notes", []))
+    try:
+        prof.shape_note = describe_shape(prof, sheet_names(data, name))
+    except Exception:
+        prof.shape_note = ""
     prof.kobo = kobo_groups(cols)
     prof.dropped = [c.name for c in cols.values() if c.role in (EMPTY, CONSTANT)]
     return prof

@@ -66,6 +66,14 @@ def _top_n(vc: pd.Series, n: int = TOP_N) -> pd.Series:
 def cat_bar(p: pf.Profile, col: str, n: int = TOP_N) -> Panel:
     c = p.columns[col]
     vc = _top_n(p.df[col].value_counts(), n)
+    if c.filled and vc.max() == 1:
+        # Every value occurs once, so a frequency bar is a row of bars all the
+        # same height: it says "this column has values", which the reader can
+        # see. The column may still be a fine dimension for a measure, so this
+        # only refuses the count panel, not the column.
+        return Panel(c.short or c.label, None, None,
+                     f"{c.filled:,} rows, every value different - nothing to "
+                     "count", "categorical", [col])
     frame = pd.DataFrame({"Category": vc.index.astype(str),
                           "Records": vc.to_numpy()})
     frame["Share"] = (100 * frame["Records"] / max(c.filled, 1)).round(1)
@@ -600,10 +608,16 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
     # Same idea on the dashboard: no measures worth charting means the questions
     # are the story.
     if len([m for m in ms if m.col != metrics.RECORDS.col]) <= 2:
-        for d in dims[:4]:
-            if len(out) >= limit:
+        # Look past the first three: on a timetable or a task list the leading
+        # columns are all one-per-row, and the one column that does repeat
+        # (Duration, Owner, Status) is further down. Stopping at three left
+        # those files with a blank page and nothing said about it.
+        for d in metrics.dimensions(p, limit=8):
+            if len([x for x in out if x.chart is not None]) >= min(limit, 4):
                 break
-            out.append(cat_bar(p, d.name, n=12))
+            q = cat_bar(p, d.name, n=12)
+            if q.chart is not None:      # cat_bar refuses an all-ones count
+                out.append(q)
     return out[:limit]
 
 def sequence_trend(p: pf.Profile, m, dim: str) -> Panel | None:
