@@ -322,6 +322,33 @@ def tracker_checks() -> None:
        any(q.kind == "categorical" for q in charts.dashboard(one, limit=6)),
        str({q.kind for q in charts.dashboard(one, limit=6)}))
 
+    # A MetricsForNews / Parse.ly style CSV: the columns declare their own job.
+    n3 = 40
+    mfn_df = pd.DataFrame({
+        'url': [f'https://x.test/a{i}/' for i in range(n3)],
+        'unique_id': [f'/a{i}/' for i in range(n3)],
+        'headline': [f'Headline number {i}' for i in range(n3)],
+        'pubdate': pd.date_range('2026-01-01', periods=n3, freq='D'),
+        'Focus Area': ['HSS' if i % 2 else 'MNCH' for i in range(n3)],
+        'tag: Topic': [f'Topic {i % 3}' for i in range(n3)],
+        'metric: Total pageviews': [100 + i * 7 for i in range(n3)],
+        'metric: Total attention hours': [2.5 + i * 0.1 for i in range(n3)],
+        'metric: Average reading minutes': [1.2 + i * 0.01 for i in range(n3)],
+    })
+    mfn = pf.build(mfn_df.to_csv(index=False).encode(), 'mfn.csv')
+    ms3 = metrics.measures(mfn, limit=4)
+    titles3 = [m.title() for m in ms3]
+    ck('a metric: prefix is stripped from titles',
+       not any('metric:' in t for t in titles3), str(titles3))
+    ck('a title does not stutter Total total',
+       not any('total total' in t.lower() or 'average average' in t.lower()
+               for t in titles3), str(titles3))
+    ck('a Total X column is summed even behind a prefix',
+       {m.col: m.agg for m in ms3}.get('metric: Total attention hours') == 'sum',
+       str({m.col: m.agg for m in ms3}))
+    ck('headline beats a slug as the label column',
+       metrics.label_column(mfn) == 'headline', str(metrics.label_column(mfn)))
+
     ck("the subtotal's value is no longer in the data",
        12345 not in set(rep.df["Views"].tolist())
        and 9000 not in set(rep.df["Active users"].tolist()),

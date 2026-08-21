@@ -89,9 +89,19 @@ class Measure:
     def verb(self) -> str:
         return {"sum": "Total", "mean": "Average", "share": "% yes"}[self.agg]
 
+    # Column names often already say how they are aggregated — "Total
+    # pageviews", "Average reading minutes". Prepending the verb anyway produced
+    # "Total total pageviews" and "Average average reading minutes".
+    SELF_DESCRIBING = ("total ", "sum ", "average ", "avg ", "mean ", "median ",
+                       "percent", "percentage", "share of", "no of",
+                       "number of", "count of", "rate of", "ratio of")
+
     def title(self) -> str:
         if self.agg == "share":
             return f"{self.label} — % yes"
+        low = self.label.strip().lower()
+        if low.startswith(self.SELF_DESCRIBING):
+            return self.label[:1].upper() + self.label[1:]
         return f"{self.verb} {self.label.lower()}"
 
     def fmt(self) -> str:
@@ -141,7 +151,7 @@ def share_measures(prof: pf.Profile, limit: int = 12) -> list:
 
 def _agg_for(name: str, stats: dict) -> tuple[str, str]:
     """(aggregation, why). Name first, then the shape of the values."""
-    low = re.sub(r"[^a-z# ]+", " ", str(name).lower()).strip()
+    low = re.sub(r"[^a-z# ]+", " ", pf.strip_prefix(name).lower()).strip()
     low = re.sub(r"\s+", " ", low)
     tokens = set(low.split())
     if low.startswith(COUNT_PREFIXES):
@@ -289,6 +299,11 @@ def ordinal_order(values) -> list:
     return [lab for _, lab in parsed]
 
 
+LABEL_WORDS = {"headline", "title", "name", "label", "article", "story",
+               "question", "item", "video", "episode", "post", "page",
+               "facility", "product", "topic", "subject"}
+
+
 def label_column(prof: pf.Profile) -> str | None:
     """The column that names the *thing* each row is about.
 
@@ -317,7 +332,12 @@ def label_column(prof: pf.Profile) -> str | None:
         distinct = c.unique / max(c.filled, 1)
         if distinct < 0.3:                    # that is a dimension, not a label
             continue
-        score = distinct + (0.4 if i < 3 else 0) - min(avg_len, 100) / 400
+        # A column called headline or title beats one called unique_id, even
+        # when both are near-unique and early in the sheet: "top 15 articles"
+        # should list headlines, not URL slugs.
+        named = bool(set(re.split(r"[^a-z]+", str(name).lower())) & LABEL_WORDS)
+        score = (distinct + (0.4 if i < 3 else 0) - min(avg_len, 100) / 400
+                 + (1.0 if named else 0))
         if score > best_score:
             best, best_score = name, score
     return best

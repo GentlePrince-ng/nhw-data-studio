@@ -350,9 +350,38 @@ def _apply_header(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 # ═══ typing ═════════════════════════════════════════════════════════════════
+# Export conventions that label a column's job in its name. MetricsForNews and
+# Parse.ly ship "metric: Total pageviews" and "tag: Topic"; the prefix is useful
+# to know and useless to read, so it is stripped for display and for the
+# aggregation rules — "metric: Total attention hours" was being averaged because
+# the rule that looks for a leading "total" saw "metric" there instead.
+FIELD_PREFIXES = ("metric", "metrics", "tag", "tags", "dim", "dimension",
+                  "measure", "field", "attr", "attribute", "custom")
+
+
+def strip_prefix(name) -> str:
+    """`metric: Total pageviews` becomes `Total pageviews`."""
+    raw = str(name).strip()
+    if ":" in raw:
+        head, rest = raw.split(":", 1)
+        if head.strip().lower() in FIELD_PREFIXES and rest.strip():
+            return rest.strip()
+    return raw
+
+
+def prefix_of(name) -> str:
+    """The convention prefix, lowercased, or "" — "metric", "tag"."""
+    raw = str(name).strip()
+    if ":" in raw:
+        head = raw.split(":", 1)[0].strip().lower()
+        if head in FIELD_PREFIXES:
+            return head
+    return ""
+
+
 def clean_label(name) -> str:
     """`hh/water_source_main` becomes `Water source main`. Kobo names are noise."""
-    s = str(name).split("/")[-1]
+    s = strip_prefix(str(name)).split("/")[-1]
     s = re.sub(r"[_\.]+", " ", s).strip()
     s = re.sub(r"\s+", " ", s)
     if s.isupper() and len(s) > 4:
@@ -412,7 +441,7 @@ def short_label(name, limit: int = 46) -> str:
     tooltip, so nothing is lost — the reader can still see exactly which
     question a bar came from.
     """
-    s = clean_label(name)
+    s = clean_label(strip_prefix(name))
     low = s.lower()
     for t in TAILS:
         if low.endswith(t):
