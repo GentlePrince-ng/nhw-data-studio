@@ -596,7 +596,15 @@ def dashboard(p: pf.Profile, limit: int = 10) -> list:
                                     level=geo_level(place)))
         if len([x for x in panels if x]) >= limit:
             break
-    return [x for x in panels if x][:limit]
+    out = [x for x in panels if x]
+    # Same idea on the dashboard: no measures worth charting means the questions
+    # are the story.
+    if len([m for m in ms if m.col != metrics.RECORDS.col]) <= 2:
+        for d in dims[:4]:
+            if len(out) >= limit:
+                break
+            out.append(cat_bar(p, d.name, n=12))
+    return out[:limit]
 
 def sequence_trend(p: pf.Profile, m, dim: str) -> Panel | None:
     """A measure across an ordered run of labels — Week 1..11, Wave 1..4.

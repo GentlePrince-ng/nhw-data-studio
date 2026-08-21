@@ -62,7 +62,10 @@ YES_NO = {"yes", "no", "y", "n", "true", "false", "1", "0", "1.0", "0.0",
 SYSTEM_COLS = ("_id", "_uuid", "_index", "_status", "_submitted_by", "_tags",
                "_notes", "_validation_status", "_submission_time", "__version__",
                "deviceid", "username", "start", "end", "today", "instanceid",
-               "meta", "audit", "formhub", "simserial", "subscriberid")
+               "meta", "audit", "formhub", "simserial", "subscriberid",
+               "imei", "phonenumber", "phone number", "devicephonenum",
+               "_attachments", "_geolocation", "_submission__id", "_xform_id",
+               "_tags", "_uri", "_attachments_count")
 
 
 def is_system(name) -> bool:
@@ -439,6 +442,21 @@ def _looks_like_id(name, s: pd.Series, unique: int, filled: int) -> bool:
     low = str(name).lower()
     named = any(low == w or low.endswith(w) or low.startswith(w.strip("_"))
                 for w in ID_WORDS)
+    # A column called phonenumber is never a measurement, however many values it
+    # repeats. Requiring near-uniqueness first meant a phone column with a few
+    # duplicates escaped this test entirely and the dashboard reported "average
+    # phonenumber 7,799,717,270".
+    if named and unique > 1:
+        return True
+    # Fixed-width long integers are codes whether or not they repeat: an NIN, an
+    # account number, a meter number.
+    if pd.api.types.is_numeric_dtype(s) and unique > 20:
+        nums = pd.to_numeric(s, errors="coerce").dropna()
+        if len(nums) and bool(np.all(np.mod(
+                nums.to_numpy(dtype="float64"), 1) == 0)):
+            widths = nums.abs().astype("int64").astype(str).str.len()
+            if widths.nunique() == 1 and widths.iloc[0] >= 8:
+                return True
     if filled <= 20 or unique / filled < 0.95:
         return False
     if not pd.api.types.is_numeric_dtype(s):
@@ -731,6 +749,26 @@ def drop_total_rows(frame: pd.DataFrame):
 ALL_SHEETS = "__all_sheets__"
 
 
+def _row_key(frame: pd.DataFrame):
+    """A set of row identities for a sheet, or None if it has no usable key.
+
+    Used to spot two sheets holding the same records. Prefers an explicit id
+    column; falls back to any near-unique column, which is what an export
+    without an id still has.
+    """
+    for name in frame.columns:
+        low = str(name).strip().lower()
+        if low in ("_id", "_uuid", "id", "uuid", "_index", "submission id"):
+            vals = frame[name].dropna()
+            if len(vals):
+                return set(vals.astype(str))
+    for name in frame.columns:
+        vals = frame[name].dropna()
+        if len(vals) > 10 and vals.nunique() / len(vals) > 0.98:
+            return set(vals.astype(str))
+    return None
+
+
 def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     """Stack every sheet that shares the workbook's dominant layout.
 
@@ -774,26 +812,61 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     # them into 25 rows, and skipped the eleven sheets with the actual data —
     # including a 9,299-row GA4 export.
     from collections import defaultdict
-    weight, sheets_of = defaultdict(int), defaultdict(list)
+    import math
+    rows_of, sheets_of = defaultdict(int), defaultdict(list)
     for sh, f in frames.items():
         key = frozenset(f.columns)
-        weight[key] += len(f)
+        rows_of[key] += len(f)
         sheets_of[key].append(sh)
-    modal_key = max(weight, key=lambda k: (weight[k], len(sheets_of[k])))
+
+    def table_score(n_cols: int, n_rows: int) -> float:
+        """How much a sheet looks like the dataset rather than a log.
+
+        Width counts far more than length. Neither rows nor cells work: a
+        9,000-row three-column pipeline log beats a 200-row seven-column data
+        table on both. Columns times log(rows) prefers the wide table while
+        still favouring the fuller of two similar sheets.
+        """
+        return max(n_cols, 1) * math.log1p(max(n_rows, 1))
+
+    modal_key = max(rows_of, key=lambda k: (table_score(len(k), rows_of[k]),
+                                            len(sheets_of[k])))
     modal = set(modal_key)
     # One sheet is not a combination. A report workbook of unrelated tables has
     # nothing to stack, and pretending otherwise hides the data behind a
     # meaningless union.
     if len(sheets_of[modal_key]) < 2:
-        biggest = max(frames, key=lambda sh: len(frames[sh]))
+        biggest = max(frames, key=lambda sh: table_score(
+            len(frames[sh].columns), len(frames[sh])))
         return None, [], [("__fallback__", biggest)]
-    keep, out = [], []
-    for sh, f in frames.items():
+    keep, out, seen_keys = [], [], []
+    # Candidate sheets, widest first: when two sheets hold the same records, the
+    # one with more columns is the annotated version and the one to keep.
+    ordered = sorted(frames.items(), key=lambda kv: -len(kv[1].columns))
+    for sh, f in ordered:
         overlap = len(modal & set(f.columns)) / max(len(modal), 1)
         if overlap < min_overlap:
             skipped.append((sh, f"different layout ({overlap:.0%} of the columns "
                                 "in common)"))
             continue
+        ids = _row_key(f)
+        dup_of = None
+        for other_sh, other_ids in seen_keys:
+            if ids is not None and other_ids is not None:
+                shared = len(ids & other_ids) / max(len(ids), 1)
+                if shared > 0.5:
+                    dup_of = (other_sh, shared)
+                    break
+        if dup_of:
+            # Stacking a raw sheet with its own annotated copy silently doubles
+            # every record — the trap a layout test cannot see, because the two
+            # layouts are 98% identical by design.
+            skipped.append((sh, f"the same records as {dup_of[0]} "
+                                f"({dup_of[1]:.0%} of its ids appear there), so "
+                                "stacking them would count everything twice"))
+            continue
+        if ids is not None:
+            seen_keys.append((sh, ids))
         g = f.copy()
         g.insert(0, "Sheet", sh)
         keep.append(sh)

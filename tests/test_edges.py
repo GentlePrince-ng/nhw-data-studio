@@ -281,6 +281,47 @@ def tracker_checks() -> None:
        any(m.col == "Views" for m in metrics.measures(tiny)),
        "the floor of 5 filled values excluded everything")
 
+    # A pipeline workbook: raw, raw+flags (same records, two extra columns), a
+    # long narrow log, and an empty cleaned sheet.
+    buf3 = io.BytesIO()
+    rng4 = np.random.default_rng(21)
+    n2 = 200
+    raw_df = pd.DataFrame({
+        "_id": range(1, n2 + 1),
+        "imei": rng4.choice([f"3566{i:011d}" for i in range(8)], n2),
+        "phonenumber": rng4.choice([8031234567 + i for i in range(40)], n2),
+        "State": rng4.choice(["Bauchi", "Kebbi"], n2),
+        "Consent": rng4.choice(["Yes", "No"], n2, p=[0.99, 0.01]),
+    })
+    flagged = raw_df.copy()
+    flagged["dq_issue"] = rng4.choice(["", "state mismatch"], n2)
+    flagged["dq_note"] = ""
+    with pd.ExcelWriter(buf3, engine="xlsxwriter") as xw:
+        raw_df.to_excel(xw, sheet_name="Kobo_Raw_Data", index=False)
+        flagged.to_excel(xw, sheet_name="Raw+DqIssues", index=False)
+        pd.DataFrame({"ts": range(9000), "level": ["INFO"] * 9000,
+                      "msg": ["step"] * 9000}
+                     ).to_excel(xw, sheet_name="Pipeline_Log", index=False)
+        raw_df.head(0).to_excel(xw, sheet_name="Cleaned Data", index=False)
+    pipe = pf.build(buf3.getvalue(), "pipeline.xlsx", sheet=pf.ALL_SHEETS)
+    ck("a long narrow log does not win over a wide data sheet",
+       pipe.rows < 1000, f"{pipe.rows} rows — the 9,000-row log was chosen")
+    ck("raw and raw+flags are not stacked into double the records",
+       pipe.rows <= n2, f"{pipe.rows} rows for {n2} records")
+    joined2, used2, skipped2 = pf.combine_sheets(buf3.getvalue(), "p.xlsx")
+    same = [why for sh, why in skipped2 if "same records" in why]
+    ck("the same-records overlap is named, not just skipped",
+       bool(same) or joined2 is None, str(skipped2)[:80])
+    one = pf.build(buf3.getvalue(), "p.xlsx", sheet="Raw+DqIssues")
+    roles = {c.name: c.role for c in one.columns.values()}
+    ck("a phone column is an identifier even when values repeat",
+       roles.get("phonenumber") == "identifier", str(roles.get("phonenumber")))
+    ck("an imei is not offered as a dimension",
+       "imei" not in [d.name for d in metrics.dimensions(one)])
+    ck("a survey with no numbers still charts its questions",
+       any(q.kind == "categorical" for q in charts.dashboard(one, limit=6)),
+       str({q.kind for q in charts.dashboard(one, limit=6)}))
+
     ck("the subtotal's value is no longer in the data",
        12345 not in set(rep.df["Views"].tolist())
        and 9000 not in set(rep.df["Active users"].tolist()),
