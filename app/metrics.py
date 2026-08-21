@@ -54,24 +54,76 @@ MEAN_WORDS = ("rate", "ratio", "pct", "percent", "percentage", "share",
 class Measure:
     """A number worth aggregating, and how to aggregate it."""
     col: str
-    label: str
-    agg: str                      # "sum" or "mean"
+    label: str                    # short, for titles
+    agg: str                      # "sum", "mean" or "share"
     why: str                      # how the aggregation was chosen, for the UI
     integerish: bool = False
+    full: str = ""                # the complete column name, for captions
+
+    # A survey's real measures are usually shares, not sums: "do you experience
+    # long wait times" has no total worth reporting, but the percentage saying
+    # yes is the number that goes in the report. Pandas cannot aggregate
+    # "share", so it runs as a mean and is scaled at the end.
+    @property
+    def pagg(self) -> str:
+        return "mean" if self.agg in ("mean", "share") else "sum"
+
+    @property
+    def scale(self) -> float:
+        return 100.0 if self.agg == "share" else 1.0
 
     @property
     def verb(self) -> str:
-        return "Total" if self.agg == "sum" else "Average"
+        return {"sum": "Total", "mean": "Average", "share": "% yes"}[self.agg]
 
     def title(self) -> str:
+        if self.agg == "share":
+            return f"{self.label} — % yes"
         return f"{self.verb} {self.label.lower()}"
 
     def fmt(self) -> str:
+        if self.agg == "share":
+            return ",.1f"
         return ",.0f" if (self.agg == "sum" or self.integerish) else ",.1f"
 
 
 RECORDS = Measure("__records__", "Records", "sum",
                   "one per row in the file", integerish=True)
+
+YES = {"yes", "y", "true", "1", "1.0"}
+NO = {"no", "n", "false", "0", "0.0"}
+
+
+def _yes_no(prof: pf.Profile, col: str) -> bool:
+    """True when a column is a yes/no question, so a share is meaningful.
+
+    Deliberately strict. A two-valued column of Male/Female is binary too, but
+    "% Male" is not a metric anybody asked for — the share only means something
+    when one of the two answers is affirmative.
+    """
+    vals = {str(v).strip().lower()
+            for v in prof.df[col].dropna().unique()[:10]}
+    return bool(vals) and vals <= (YES | NO) and bool(vals & YES)
+
+
+def share_measures(prof: pf.Profile, limit: int = 12) -> list:
+    """One measure per yes/no question: the percentage answering yes."""
+    whole, options = [], []
+    for c in prof.by_role(pf.BINARY):
+        if pf.is_system(c.name) or not _yes_no(prof, c.name):
+            continue
+        if c.filled < max(20, 0.1 * c.n):
+            continue
+        m = Measure(c.name, c.short or c.label, "share",
+                    "share of answers that were yes", full=c.label)
+        # An option inside a select-all-that-apply family is a real share, but
+        # six of them from one question would crowd out five other questions.
+        # Distinct questions first, options after.
+        if "/" in c.name and c.name.rsplit("/", 1)[0] in prof.kobo:
+            options.append(m)
+        else:
+            whole.append(m)
+    return (whole + options)[:limit]
 
 
 def _agg_for(name: str, stats: dict) -> tuple[str, str]:
@@ -108,11 +160,17 @@ def measures(prof: pf.Profile, limit: int = 6, overrides: dict | None = None
         agg, why = _agg_for(c.name, c.stats)
         if c.name in overrides and overrides[c.name] != agg:
             agg, why = overrides[c.name], "set by you on this page"
-        out.append(Measure(c.name, c.label, agg, why,
-                           bool(c.stats.get("integerish"))))
+        if pf.is_system(c.name):
+            continue
+        out.append(Measure(c.name, c.short or c.label, agg, why,
+                           bool(c.stats.get("integerish")), full=c.label))
         if len(out) > limit:
             break
-    return out
+    # A perception survey has few things to total and many things to take a
+    # share of; without these it produced a two-measure dashboard from 88
+    # columns, 22 of which were yes/no questions.
+    out += share_measures(prof, limit=max(2, limit))
+    return out[: limit * 3]
 
 
 def _sliceable(prof: pf.Profile, c) -> bool:
@@ -133,8 +191,8 @@ def _sliceable(prof: pf.Profile, c) -> bool:
 
 def dimensions(prof: pf.Profile, limit: int = 6) -> list:
     """Columns worth slicing by — few enough levels to compare at a glance."""
-    dims = [c for c in prof.headline_cats(limit=limit * 3)
-            if _sliceable(prof, c)]
+    dims = [c for c in prof.headline_cats(limit=limit * 4)
+            if _sliceable(prof, c) and not pf.is_system(c.name)]
     place = prof.best_geo()
     if place and place not in [d.name for d in dims]:
         col = prof.columns.get(place)
@@ -182,8 +240,10 @@ def _series(df: pd.DataFrame, m: Measure) -> pd.Series:
     """The measure as a clean numeric column, sentinels removed."""
     if m.col == RECORDS.col:
         return pd.Series(np.ones(len(df)), index=df.index)
-    s = pd.to_numeric(df[m.col], errors="coerce")
-    return s
+    if m.agg == "share":
+        low = df[m.col].astype(str).str.strip().str.lower()
+        return low.map(lambda v: 1.0 if v in YES else (0.0 if v in NO else np.nan))
+    return pd.to_numeric(df[m.col], errors="coerce")
 
 
 def apply(df: pd.DataFrame, m: Measure, prof: pf.Profile) -> pd.Series:
@@ -199,7 +259,7 @@ def total(df: pd.DataFrame, m: Measure, prof: pf.Profile) -> float:
     s = apply(df, m, prof).dropna()
     if s.empty:
         return float("nan")
-    return float(s.sum() if m.agg == "sum" else s.mean())
+    return float(s.sum() if m.agg == "sum" else s.mean()) * m.scale
 
 
 def by_dimension(df: pd.DataFrame, m: Measure, dim: str,
@@ -215,8 +275,9 @@ def by_dimension(df: pd.DataFrame, m: Measure, dim: str,
                       "_v": apply(df, m, prof)}).dropna(subset=["_v"])
     if d.empty:
         return pd.DataFrame(columns=["Category", m.verb, "Records"])
-    g = d.groupby("Category", observed=True)["_v"].agg([m.agg, "size"])
+    g = d.groupby("Category", observed=True)["_v"].agg([m.pagg, "size"])
     g.columns = [m.verb, "Records"]
+    g[m.verb] = g[m.verb] * m.scale
     g = g.sort_values(m.verb, ascending=False).reset_index()
     g[m.verb] = g[m.verb].round(2)
     g.attrs["merged"] = merged
@@ -245,8 +306,9 @@ def over_time(df: pd.DataFrame, m: Measure, date: str, prof: pf.Profile,
     freq = freq or grain_for(span)
     label, code = GRAINS[freq]
     d["Period"] = d["_d"].dt.to_period(code).dt.to_timestamp()
-    g = d.groupby("Period")["_v"].agg(m.agg).reset_index()
+    g = d.groupby("Period")["_v"].agg(m.pagg).reset_index()
     g.columns = ["Period", m.verb]
+    g[m.verb] = g[m.verb] * m.scale
     g[m.verb] = g[m.verb].round(2)
     return g, label
 
@@ -276,8 +338,8 @@ def compare_periods(df: pd.DataFrame, m: Measure, date: str, prof: pf.Profile
     prev = d[(d["_d"] > b_start) & (d["_d"] <= b_end)]["_v"]
     if cur.empty or prev.empty:
         return {}
-    now = float(cur.sum() if m.agg == "sum" else cur.mean())
-    then = float(prev.sum() if m.agg == "sum" else prev.mean())
+    now = float(cur.sum() if m.agg == "sum" else cur.mean()) * m.scale
+    then = float(prev.sum() if m.agg == "sum" else prev.mean()) * m.scale
     return {"now": now, "then": then, "window": win,
             "label": f"previous {win} days",
             "detail": (f"{a_start:%d %b} – {a_end:%d %b} against "
@@ -306,8 +368,8 @@ def change_by_dimension(df: pd.DataFrame, m: Measure, dim: str, date: str,
     cur = d[d["_d"] > end - pd.Timedelta(days=win)]
     prev = d[(d["_d"] > end - pd.Timedelta(days=win * 2))
              & (d["_d"] <= end - pd.Timedelta(days=win))]
-    a = cur.groupby("_g")["_v"].agg(m.agg)
-    b = prev.groupby("_g")["_v"].agg(m.agg)
+    a = cur.groupby("_g")["_v"].agg(m.pagg) * m.scale
+    b = prev.groupby("_g")["_v"].agg(m.pagg) * m.scale
     out = pd.concat([b.rename("Before"), a.rename("After")], axis=1).fillna(0)
     out["Change"] = (out["After"] - out["Before"]).round(2)
     out = out.reset_index().rename(columns={"_g": "Category"})

@@ -74,8 +74,9 @@ def cat_bar(p: pf.Profile, col: str, n: int = TOP_N) -> Panel:
         note += f" · {c.missing_pct:.0f}% blank"
     if c.unique > n:
         note += f" · {c.unique} categories, top {n} shown"
-    return Panel(c.label, theme.bar(frame, "Records", "Category"), frame,
-                 note, "categorical", [col])
+    return Panel(c.short or c.label, theme.bar(frame, "Records", "Category"),
+                 frame, note + (f" · {c.label}" if c.short != c.label else ""),
+                 "categorical", [col])
 
 
 def num_hist(p: pf.Profile, col: str, bins: int = 28) -> Panel:
@@ -176,7 +177,7 @@ def group_bar(p: pf.Profile, num: str, cat: str, agg: str = "mean") -> Panel:
     note = f"{agg} of {c.label.lower()} by {p.label(cat).lower()}"
     if thin:
         note += f" · {thin} group(s) under 20 records — read with care"
-    return Panel(f"{c.label} by {p.label(cat)}",
+    return Panel(f"{c.short or c.label} by {p.short(cat)}",
                  theme.bar(g, agg.title(), "Category", fmt=",.2f"), g, note,
                  "group", [num, cat])
 
@@ -212,7 +213,7 @@ def cross_heat(p: pf.Profile, a: str, b: str, pct: bool = True) -> Panel:
                  alt.Tooltip("share:Q", title="% of row", format=".1f")],
     ).properties(height=alt.Step(26))
     out = ct.reset_index()
-    return Panel(f"{p.label(a)} by {p.label(b)}", ch, out,
+    return Panel(f"{p.short(a)} by {p.short(b)}", ch, out,
                  f"{int(ct.to_numpy().sum()):,} records with both answered · "
                  "shaded by % of row", "cross", [a, b])
 
@@ -250,7 +251,7 @@ def scatter(p: pf.Profile, x: str, y: str, colour: str | None = None) -> Panel:
         note += f" · {SCATTER_MAX:,} plotted at random"
     if pd.notna(r):
         note += f" · correlation {r:+.2f} (not causation)"
-    return Panel(f"{p.label(y)} against {p.label(x)}",
+    return Panel(f"{p.short(y)} against {p.short(x)}",
                  ch.properties(height=300), None, note, "scatter", [x, y])
 
 
@@ -278,7 +279,7 @@ def cat_trend(p: pf.Profile, date: str, cat: str, n: int = 5) -> Panel | None:
     out = g.copy()
     out["Period"] = out["Period"].dt.strftime("%Y-%m-%d")
     out = out.rename(columns={"g": p.label(cat)})
-    return Panel(f"{p.label(cat)} over time", ch, out,
+    return Panel(f"{p.short(cat)} over time", ch, out,
                  f"top {len(keep)} of {p.df[cat].nunique()} categories · "
                  f"per {'week' if per == 'W' else 'month'}", "cat_trend",
                  [date, cat])
@@ -320,7 +321,7 @@ def state_map(p: pf.Profile, place: str | None = None, value: str | None = None,
         return None
 
     counting = agg == "count" or not value
-    what = "Records" if counting else f"{agg.title()} of {p.label(value)}"
+    what = "Records" if counting else f"{agg.title()} of {p.short(value)}"
     fmt = ",.0f" if counting else ",.2f"
     unit = "states and the FCT" if level == "state" else "LGAs"
     bits = [f"{j.matched} of {len(j.features)} {unit} have data"]
@@ -481,8 +482,10 @@ def measure_trend(p: pf.Profile, m, date: str | None = None,
                      x_format=fmt)
     out = frame.copy()
     out["Period"] = pd.to_datetime(out["Period"]).dt.strftime("%Y-%m-%d")
-    return Panel(f"{m.title().capitalize()} over time", ch, out,
-                 f"per {grain} · {m.why}", "metric_trend", [m.col, date])
+    return Panel(f"{m.title()} over time", ch, out,
+                 f"per {grain} · {m.why}"
+                 + (f" · {m.full}" if m.full and m.full != m.label else ""),
+                 "metric_trend", [m.col, date])
 
 
 def measure_by(p: pf.Profile, m, dim: str, top: int = 12,
@@ -502,6 +505,8 @@ def measure_by(p: pf.Profile, m, dim: str, top: int = 12,
         return None
     thin = int((frame["Records"] < 20).sum())
     note = m.why
+    if m.full and m.full != m.label:
+        note += f" · {m.full}"
     merged = frame.attrs.get("merged", 0)
     if merged:
         note += f" · {merged} spelling(s) merged into their commonest form"
@@ -509,7 +514,7 @@ def measure_by(p: pf.Profile, m, dim: str, top: int = 12,
         note += f" · {thin} group(s) under 20 records"
     if len(frame) == top:
         note += f" · top {top}"
-    return Panel(f"{m.title().capitalize()} by {p.label(dim)}",
+    return Panel(f"{m.title()} by {p.short(dim)}",
                  theme.bar(frame, m.verb, "Category", fmt=m.fmt()), frame,
                  note, "measure_by", [m.col, dim])
 
@@ -543,7 +548,7 @@ def change_by(p: pf.Profile, m, dim: str, date: str | None = None) -> Panel | No
                  alt.Tooltip("Records:Q", title="records now", format=",")],
     ).properties(height=alt.Step(24))
     win = metrics.compare_periods(p.df, m, date, p).get("window", 30)
-    return Panel(f"What moved — {m.title().lower()} by {p.label(dim)}",
+    return Panel(f"What moved — {m.title()} by {p.short(dim)}",
                  ch, frame,
                  f"last {win} days against the {win} before · green up, red down",
                  "change_by", [m.col, dim, date])

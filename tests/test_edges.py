@@ -63,6 +63,96 @@ def run(label: str, frame: pd.DataFrame, as_csv: bool = False) -> None:
         fails.append(label)
 
 
+def kobo_shaped() -> "pd.DataFrame":
+    """A Kobo export the way the CBPS household survey arrives.
+
+    Every one of these shapes broke something when the tool met real survey
+    data: whole questions as column names, GPS columns, a select_all family
+    whose parent column also exists, and yes/no attitude questions that are the
+    only real measures in the file.
+    """
+    rng = np.random.default_rng(5)
+    n = 400
+    q = "Do you feel that the PHC facility is adequately equipped:"
+    parent = "What factors influence your choice of PHC facility (select all that apply):"
+    d = {
+        "_id": range(1, n + 1),
+        "Date": pd.Timestamp("2026-03-01") + pd.to_timedelta(
+            rng.integers(0, 120, n), unit="D"),
+        "State": rng.choice(["Kano", "Lagos", "Borno", "Enugu"], n),
+        "LGA": rng.choice([f"LGA {i}" for i in range(12)], n),
+        "_Geo-Point_latitude": rng.uniform(4, 13, n),
+        "_Geo-Point_longitude": rng.uniform(3, 14, n),
+        "_Geo-Point_altitude": rng.uniform(20, 500, n),
+        "_Geo-Point_precision": rng.uniform(3, 20, n),
+        "__version__": "v3",
+        "deviceid": rng.choice([f"dev{i}" for i in range(6)], n),
+        q: rng.choice(["Yes", "No"], n, p=[0.6, 0.4]),
+        "Do you experience long wait times or delays when accessing care?":
+            rng.choice(["Yes", "No"], n, p=[0.3, 0.7]),
+        "What is the number of people living in the household":
+            rng.integers(1, 12, n),
+        "Sex of Household Head": rng.choice(["Male", "Female"], n),
+        parent: ["Proximity to home Cost of services"] * n,
+    }
+    for opt in ["Proximity to home", "Cost of services", "Quality of care",
+                "Availability of specific services"]:
+        d[f"{parent}/{opt}"] = (rng.random(n) < 0.5).astype(int)
+    return pd.DataFrame(d)
+
+
+def kobo_checks() -> None:
+    """The behaviours a real Kobo export taught us, on synthetic data."""
+    from app import metrics
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+        kobo_shaped().to_excel(xw, index=False, sheet_name="HHS")
+    prof = pf.build(buf.getvalue(), "kobo.xlsx")
+
+    def ck(label, cond, detail=""):
+        print(("  PASS  " if cond else "  FAIL  ") + label
+              + (f"  {detail}" if detail and not cond else ""))
+        if not cond:
+            fails.append(label)
+
+    geo = [c.name for c in prof.by_role(pf.GEO)]
+    ck("question text containing 'facility' is not geography",
+       not any(len(g) > 40 for g in geo), str(geo))
+    ck("State and LGA are still geography",
+       {"State", "LGA"} <= set(geo), str(geo))
+
+    ms = metrics.measures(prof, limit=6)
+    cols = [m.col for m in ms]
+    ck("GPS columns are never measures",
+       not any("Geo-Point" in c for c in cols), str(cols)[:90])
+    ck("household size is a measure",
+       any("number of people" in c for c in cols))
+    ck("yes/no questions become % yes measures",
+       any(m.agg == "share" for m in ms),
+       str([(m.label[:20], m.agg) for m in ms]))
+    ck("Male/Female does not become a % measure",
+       not any(m.col == "Sex of Household Head" and m.agg == "share"
+               for m in ms))
+    share = next((m for m in ms if m.agg == "share"), None)
+    if share:
+        v = metrics.total(prof.df, share, prof)
+        ck("a share reads as a percentage, not a fraction", 1 < v < 100,
+           f"{v:.3f}")
+
+    dims = [d.name for d in metrics.dimensions(prof)]
+    ck("Kobo plumbing is not offered as a dimension",
+       "__version__" not in dims and "deviceid" not in dims, str(dims)[:90])
+
+    ck("a select-all family is folded even when its parent column exists",
+       len(prof.kobo) == 1 and len(next(iter(prof.kobo.values()))) == 4,
+       f"{len(prof.kobo)} families")
+
+    titles = [q.title for q in charts.dashboard(prof, limit=8)]
+    ck("chart titles are short enough to read",
+       all(len(t) < 95 for t in titles),
+       max(titles, key=len)[:110] if titles else "none")
+
+
 def main() -> int:
     rng = np.random.default_rng(11)
     print("\n--- awkward uploads ---")
@@ -130,6 +220,9 @@ def main() -> int:
           "boundary")
     if not ok:
         fails.append("map drawn from unmatchable place names")
+
+    print("\n--- kobo-shaped survey (what the real CBPS file taught us) ---")
+    kobo_checks()
 
     print("\n--- size ---")
     n = 100_000

@@ -59,6 +59,31 @@ YES_NO = {"yes", "no", "y", "n", "true", "false", "1", "0", "1.0", "0.0",
           "oui", "non"}
 
 
+SYSTEM_COLS = ("_id", "_uuid", "_index", "_status", "_submitted_by", "_tags",
+               "_notes", "_validation_status", "_submission_time", "__version__",
+               "deviceid", "username", "start", "end", "today", "instanceid",
+               "meta", "audit", "formhub", "simserial", "subscriberid")
+
+
+def is_system(name) -> bool:
+    """Kobo/ODK plumbing: real columns, but never the subject of a chart."""
+    low = str(name).strip().lower()
+    return low in SYSTEM_COLS or low.startswith(("_geo", "meta/", "formhub/"))
+
+
+COORD_WORDS = ("latitude", "longitude", "lat", "lon", "lng", "altitude",
+               "precision", "geopoint", "geo point", "gps", "accuracy",
+               "easting", "northing", "elevation")
+
+
+def _is_coordinate(name) -> bool:
+    """A GPS field, not a measurement. Never a measure, never a correlation."""
+    low = re.sub(r"[^a-z ]+", " ", str(name).lower())
+    tokens = set(low.split())
+    return bool(tokens & set(COORD_WORDS)) or any(w in low for w in
+                                                  ("geopoint", "geo point"))
+
+
 @dataclass
 class Column:
     """One column, with the numbers every page needs already computed."""
@@ -69,6 +94,7 @@ class Column:
     missing: int
     unique: int
     label: str = ""                      # cleaned, human-readable
+    short: str = ""                      # title-length version of the label
     sample: list = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     sentinel_hits: dict = field(default_factory=dict)
@@ -106,6 +132,11 @@ class Profile:
     def label(self, col: str) -> str:
         c = self.columns.get(col)
         return c.label if c and c.label else str(col)
+
+    def short(self, col: str) -> str:
+        """The title-length label. Falls back to the full one."""
+        c = self.columns.get(col)
+        return (c.short or c.label) if c else str(col)
 
     def best_date(self):
         """The date column a trend should use: most complete, then most spread."""
@@ -145,9 +176,17 @@ class Profile:
         return [c for _, _, c in out[:limit]]
 
     def headline_nums(self, limit: int = 4) -> list:
-        """Numerics worth a KPI tile: filled, varying, not a sentinel dump."""
+        """Numerics worth a KPI tile: filled, varying, not a sentinel dump.
+
+        Coordinates are excluded outright. Kobo ships every submission with
+        latitude, longitude, altitude and GPS precision, all of which are
+        numeric, well filled and varying — so they sailed onto the dashboard as
+        "Average geo-point latitude", which is not a number anybody wants a mean
+        of. They are location, not measurement.
+        """
         out = [c for c in self.by_role(NUMERIC)
-               if c.filled >= max(5, 0.2 * c.n) and c.stats.get("std", 0) > 0]
+               if c.filled >= max(5, 0.2 * c.n) and c.stats.get("std", 0) > 0
+               and not _is_coordinate(c.name)]
         out.sort(key=lambda c: -c.filled)
         return out[:limit]
 
@@ -219,6 +258,55 @@ def _texty(s: pd.Series) -> bool:
         return False
 
 
+# Question stems that carry no information in a chart title. A Kobo column name
+# is the entire question, so "Do you experience long wait times or delays when
+# accessing care at the PHC facility?" has to become "Experience long wait times"
+# or every title on the page is a paragraph.
+STEMS = (
+    "in your opinion,", "based on your recent experiences,", "based on your",
+    "please tell us", "we would like to know", "kindly tell us",
+    "how satisfied are you with the", "how satisfied are you",
+    "how would you rate the", "how would you rate",
+    "how often do you", "how has the", "how have these", "how do you think",
+    "how many", "how ", "what is the", "what are the", "what other",
+    "what specific", "what factors", "what role do you think",
+    "what improvements do you think are needed to", "what ", "which ",
+    "do you feel that your", "do you feel that the", "do you feel that",
+    "do you believe that the", "do you believe that", "do you receive",
+    "do you experience", "do you face any", "do you consent to", "do you or your",
+    "do you ", "are there ", "are you ", "have you ", "has ", "is there any",
+    "is there ", "can you describe", "can you give", "can you share", "can you ",
+    "when you or your family members need", "when ",
+)
+TAILS = ("(select all that apply):", "(select all that apply)", "(please specify)",
+         "- please specify", ":", "?")
+
+
+def short_label(name, limit: int = 46) -> str:
+    """A chart-title-length version of a column name.
+
+    Kept separate from `label`, which stays complete: the short form goes in
+    titles and axis labels, the full question stays in the caption and the
+    tooltip, so nothing is lost — the reader can still see exactly which
+    question a bar came from.
+    """
+    s = clean_label(name)
+    low = s.lower()
+    for t in TAILS:
+        if low.endswith(t):
+            s = s[: len(s) - len(t)].strip(" -–—:")
+            low = s.lower()
+    for stem in STEMS:
+        if low.startswith(stem):
+            s = s[len(stem):].strip()
+            break
+    s = re.sub(r"\s+", " ", s).strip(" -–—:,")
+    if len(s) > limit:
+        cut = s[:limit].rsplit(" ", 1)[0]
+        s = (cut or s[:limit]).rstrip(" ,;:") + "…"
+    return (s[:1].upper() + s[1:]) if s else clean_label(name)
+
+
 def _looks_like_id(name, s: pd.Series, unique: int, filled: int) -> bool:
     """An identifier labels a row; a measurement describes it.
 
@@ -260,9 +348,18 @@ def _is_geo(name, values: pd.Series) -> bool:
 
     Substring matching read facility_type as geography, which then sorted it into
     the map-shaped part of the app and out of the crosstabs where it belonged.
+
+    The name rule applies only to **short** names. A Kobo export uses the whole
+    question as the column name, and fifteen columns of a real household survey
+    typed as geography because the question happened to contain "facility" or
+    "community" — "Do you feel that the PHC facility is adequately equipped" is
+    not a place. A column name that is a sentence is a question; only a label
+    can be a place name, so anything long has to earn `geo` from its values.
     """
-    tokens = set(re.split(r"[^a-z0-9]+", str(name).lower())) - {""}
-    if tokens & set(GEO_WORDS) and not tokens & NOT_PLACE:
+    label = str(name).strip()
+    tokens = set(re.split(r"[^a-z0-9]+", label.lower())) - {""}
+    short = len(label) <= 40 and len(tokens) <= 5
+    if short and tokens & set(GEO_WORDS) and not tokens & NOT_PLACE:
         return True
     if _texty(values) and len(values) > 5:
         vals = {str(v).strip().lower() for v in values.head(400)}
@@ -423,6 +520,7 @@ def classify(df: pd.DataFrame):
         cols[name] = Column(
             name=name, role=role, dtype=str(df[name].dtype), n=n,
             missing=missing, unique=unique, label=clean_label(name),
+            short=short_label(name),
             sample=[str(v)[:60] for v in s.dropna().head(4).tolist()],
             stats=stats, sentinel_hits=sent,
         )
@@ -443,7 +541,12 @@ def kobo_groups(cols: dict) -> dict:
         parent = name.rsplit("/", 1)[0]
         if c.role in (BINARY, EMPTY, CONSTANT) or c.unique <= 3:
             fams.setdefault(parent, []).append(name)
-    return {p: v for p, v in fams.items() if len(v) >= 3 and p not in cols}
+    # The parent column is allowed to exist. Kobo sometimes ships the joined
+    # answer as its own column *and* one binary column per option; requiring the
+    # parent to be absent meant a real household survey with seven such families
+    # detected none of them, and the option columns scattered across the page as
+    # unrelated yes/no fields.
+    return {p: v for p, v in fams.items() if len(v) >= 3}
 
 
 def multi_counts(df: pd.DataFrame, members: list) -> pd.DataFrame:
