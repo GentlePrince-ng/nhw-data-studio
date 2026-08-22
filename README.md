@@ -26,7 +26,8 @@ check — not reading the output, which is how two red suites once got reported 
 green.
 
 On the sample that runs in about **six seconds** end to end — including drawing
-both maps and building the downloadable report.
+both maps and building the downloadable report. The largest real workbooks in
+the archive — 66,000 rows, or 576 columns across 21 sheets — take under ten.
 
 ## What it does
 
@@ -221,8 +222,17 @@ each written *after* the discovery, and they only protect against what has
 already been seen — this is how the next shape gets found by a command instead
 of by a colleague.
 
-Last full run, 220 files across the archive: **161 charted, 59 explained, 0
-empty, 0 errors, 0 slow.**
+Last full run, 220 files across the archive: **160 charted, 60 explained, 0
+empty, 0 errors, 0 slow — about a second a file.**
+
+Reading is the part that used to be slow, not the analysis: fifteen of 355 files
+took over 25 seconds and one took 261. `python-calamine` reads the same
+workbooks 6-9x faster than openpyxl with identical results, the sheet list is
+cached rather than parsed three times per upload, and a column with neither a
+heading nor more than a trace of data is dropped before anything is named — one
+tracker sheet had a single pasted row of 16,377 links, which read as 16,377
+columns. calamine is optional: without it everything still works, and `.xls`
+uploads are not offered because openpyxl cannot read them.
 
 ## Size
 
