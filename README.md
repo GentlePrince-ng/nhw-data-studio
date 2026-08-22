@@ -210,7 +210,7 @@ Outcomes, worst first:
 | `ERROR` | an exception. Always a tool bug: an unreadable file should degrade to a thin page, never a traceback. |
 | `EMPTY` | zero charts **and nothing said about why**. Where a silent misread hides. There should be none. |
 | `NOTTABLE` | nothing to chart, and the page says why — a form definition, a cover sheet, a list with no numbers. A good outcome. |
-| `SLOW` | over 25s. A tool sold as "under five minutes" has to be. |
+| `SLOW` | slower than 20s + 2s per MB. Scaled by size, so a 22 MB workbook taking half a minute is fine and a 5 MB one taking four minutes is not. |
 | `OK` | rows, columns, and at least one chart. |
 
 Why it exists: every serious bug in this tool was found by pointing it at one
@@ -222,8 +222,10 @@ each written *after* the discovery, and they only protect against what has
 already been seen — this is how the next shape gets found by a command instead
 of by a colleague.
 
-Last full run, 220 files across the archive: **160 charted, 60 explained, 0
-empty, 0 errors, 0 slow — about a second a file.**
+Last full run, 400 files across the archive: **288 charted, 110 explained, 0
+empty, 0 errors, 0 slow — 1.7s a file.** The two slowest are 22 MB ICL exports
+with 600 columns, at just under half a minute each; pandas spends that
+converting 13 million cells and there is nothing left to shave.
 
 Reading is the part that used to be slow, not the analysis: fifteen of 355 files
 took over 25 seconds and one took 261. `python-calamine` reads the same

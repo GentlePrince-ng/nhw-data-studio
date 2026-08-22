@@ -28,7 +28,8 @@ Outcomes, in order of seriousness:
   NOTTABLE — nothing to chart, and the tool says why on the page: a form
            definition, a cover sheet, a pivot layout, a list with no numbers,
            a workbook Excel cannot open. A good outcome.
-  SLOW   — over the threshold. A tool sold as "under five minutes" has to be.
+  SLOW   — slower than 20s + 2s per MB. Scaled by size, so a 22 MB workbook
+           taking half a minute is fine and a 5 MB one taking four is not.
   OK     — rows, columns and at least one chart.
 
 Compare two runs to see whether a change helped: each run writes a JSON summary
@@ -56,7 +57,15 @@ DEFAULT_ROOTS = [
 SUFFIXES = {".csv", ".xlsx", ".xlsm", ".tsv"}
 if pf._CALAMINE:
     SUFFIXES.add(".xls")            # readable only with the faster engine
-SLOW_SECONDS = 25.0
+# Scaled by size, because "slow" means slow *for this file*. A flat 25s
+# flagged the two 22 MB, 600-column ICL exports — where pandas spends the time
+# converting 13 million cells and nothing is wrong — while a 5 MB file taking
+# 261s sat just as far over the line. Size-aware, the second one still shows.
+SLOW_BASE, SLOW_PER_MB = 20.0, 2.0
+
+
+def slow_after(mb: float) -> float:
+    return SLOW_BASE + SLOW_PER_MB * max(mb, 0.0)
 
 
 def find_files(root: Path, max_mb: float, only: str | None) -> list:
@@ -150,8 +159,11 @@ def exercise(path: Path) -> dict:
                    detail=f"{type(exc).__name__}: {str(exc)[:120]}")
         row["traceback"] = traceback.format_exc(limit=6)
     row["seconds"] = round(time.perf_counter() - started, 1)
-    if row["status"] == "OK" and row["seconds"] > SLOW_SECONDS:
-        row.update(status="SLOW", detail=f"{row['seconds']}s")
+    limit = slow_after(row["mb"])
+    if row["status"] == "OK" and row["seconds"] > limit:
+        row.update(status="SLOW",
+                   detail=f"{row['seconds']}s for {row['mb']} MB "
+                          f"(over {limit:.0f}s)")
     return row
 
 
