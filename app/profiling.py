@@ -326,10 +326,24 @@ def find_header(raw: pd.DataFrame, look: int = 15) -> int:
     rows** — the title became the only column name and every real heading became
     data. Nothing downstream can recover from that.
 
-    The header is taken to be the row with the most filled cells among the first
-    few, requiring that its values are distinct (a header does not repeat a
-    label) and that there is data underneath. A normal file wins on row 0
-    immediately, so well-formed exports are unaffected.
+    The rule is **type contrast**, not width. A header is text sitting on top of
+    numbers; a row of data matches the type of its own column. Counting both
+    ways, as a share of the columns that can be judged, is what separates them.
+    Width was the main term once, and it meant any full row of data beat a
+    header with merged or empty cells above it — a post-test analysis came out
+    headed with a trainee's name, a funding table with 186083442.0. Width is
+    now only a tie-breaker.
+
+    Four smaller rules, each from one real file: a year is a name, so a table
+    headed 2015..2021 is a header row; a row with nothing beneath it is not
+    scored at all, because every signal collapses to zero at the bottom of the
+    sampled block and the last row then wins by default; a row holding an email
+    or a URL is never a header, while *length* must not be a signal because a
+    Kobo heading is a whole question; and where two adjacent rows both look like
+    headers the lower one wins, so `_merge_header` can fold the merged group
+    name above it back in.
+
+    A well-formed export wins on row 0 immediately and is unaffected.
     """
     if raw.empty:
         return 0

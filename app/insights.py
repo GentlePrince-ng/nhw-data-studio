@@ -216,6 +216,11 @@ def _trend(p: pf.Profile) -> list:
     if not date:
         return out
     s = pd.to_datetime(p.df[date], errors="coerce").dropna()
+    # Same as metrics.over_time: bucketing a tz-aware column drops the zone
+    # with a warning nobody reads. Keep the wall clock the export was written
+    # in, explicitly.
+    if getattr(s.dtype, "tz", None) is not None:
+        s = s.dt.tz_localize(None)
     if len(s) < 12:
         return out
     span = (s.max() - s.min()).days

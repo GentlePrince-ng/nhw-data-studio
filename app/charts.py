@@ -63,6 +63,15 @@ def _top_n(vc: pd.Series, n: int = TOP_N) -> pd.Series:
 
 
 # ═══ one column at a time ═══════════════════════════════════════════════════
+def _naive(s: pd.Series) -> pd.Series:
+    """Drop a UTC offset, keeping the wall clock the export was written in.
+
+    `to_period` does this anyway but warns while doing it, and the warning went
+    unread until an hourly axis made it matter whether 14:00 meant Lagos or UTC.
+    """
+    return s.dt.tz_localize(None) if getattr(s.dtype, "tz", None) is not None else s
+
+
 def cat_bar(p: pf.Profile, col: str, n: int = TOP_N) -> Panel:
     c = p.columns[col]
     vc = _top_n(p.df[col].value_counts(), n)
@@ -134,6 +143,7 @@ def time_trend(p: pf.Profile, col: str | None = None,
     if not col:
         return None
     s = pd.to_datetime(p.df[col], errors="coerce").dropna()
+    s = _naive(s)
     if len(s) < 3:
         return None
     span = (s.max() - s.min()).days
@@ -265,7 +275,7 @@ def scatter(p: pf.Profile, x: str, y: str, colour: str | None = None) -> Panel:
 
 def cat_trend(p: pf.Profile, date: str, cat: str, n: int = 5) -> Panel | None:
     """Top categories over time — how the mix moved, not just the total."""
-    s = pd.to_datetime(p.df[date], errors="coerce")
+    s = _naive(pd.to_datetime(p.df[date], errors="coerce"))
     d = pd.DataFrame({"d": s, "g": p.df[cat].astype(str)}).dropna()
     if d.empty:
         return None
