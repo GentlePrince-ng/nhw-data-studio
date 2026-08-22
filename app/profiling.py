@@ -238,6 +238,34 @@ def file_key(name: str, data: bytes) -> str:
     return name + ":" + hashlib.sha1(data).hexdigest()[:16]
 
 
+def _engine(name: str):
+    """Which Excel reader to use, or None for pandas' own default.
+
+    openpyxl reads xlsx by parsing XML in Python, and on a 21-sheet workbook
+    that was 20 of the 32 seconds an upload took — one file in the archive took
+    261s, against a promise of "under five minutes" for the whole job. calamine
+    reads the same files 6-9x faster with identical results, and also opens the
+    legacy .xls that openpyxl cannot. It is optional: without it everything
+    still works, just slower.
+    """
+    if name.lower().endswith((".csv", ".txt", ".tsv")):
+        return None
+    return "calamine" if _CALAMINE else None
+
+
+try:                                  # optional, and only ever a speed-up
+    import python_calamine as _pc     # noqa: F401
+    _CALAMINE = True
+except ImportError:
+    _CALAMINE = False
+
+
+# openpyxl parses every sheet's XML on open, so a 21-sheet workbook cost two
+# seconds a time — and the pipeline asked for the sheet list three times per
+# upload (the sidebar, the combine step, then describe_shape). Keyed on the
+# bytes, so a different upload never sees a stale answer.
+_SHEET_CACHE: dict = {}
+
 UNREADABLE = ("Excel could not open this workbook — the file's formatting "
               "section is invalid, which some export tools produce. Open it in "
               "Excel and use Save As to write a fresh .xlsx, then upload that.")
@@ -253,11 +281,18 @@ def sheet_names(data: bytes, name: str) -> list:
     """
     if name.lower().endswith((".csv", ".txt", ".tsv")):
         return []
+    key = (len(data), hash(data))
+    if key in _SHEET_CACHE:
+        return list(_SHEET_CACHE[key])
     try:
-        with pd.ExcelFile(io.BytesIO(data)) as xl:
-            return list(xl.sheet_names)
+        with pd.ExcelFile(io.BytesIO(data), engine=_engine(name)) as xl:
+            names = list(xl.sheet_names)
     except Exception:                    # noqa: BLE001 - any parser failure
-        return []
+        names = []
+    if len(_SHEET_CACHE) > 8:            # one upload at a time; this is a lid
+        _SHEET_CACHE.clear()
+    _SHEET_CACHE[key] = names
+    return list(names)
 
 
 def split_comments(data: bytes):
@@ -389,7 +424,11 @@ def find_header(raw: pd.DataFrame, look: int = 15) -> int:
         # row is — which width did, so a header split across two merged rows
         # always lost to the first full row of data beneath it.
         switch = datalike = 0
-        for pos in range(block.shape[1]):
+        # Contrast is a *share*, so a sample of columns answers the same
+        # question as all of them — and one tracker sheet had a stray range
+        # 16,000 columns wide, where scanning every column for every candidate
+        # row was most of the twenty seconds that file took to open.
+        for pos in range(min(block.shape[1], 80)):
             cell = block.iat[r, pos]
             if pd.isna(cell):
                 continue
@@ -444,7 +483,7 @@ def find_header(raw: pd.DataFrame, look: int = 15) -> int:
 def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
     """Read CSV or Excel into a frame, tolerating the usual export mess."""
     low = name.lower()
-    if low.endswith(".xls"):
+    if low.endswith(".xls") and not _CALAMINE:
         raise ValueError("Old .xls format — open it in Excel and Save As .xlsx")
     if not low.endswith((".csv", ".txt", ".tsv")) and not sheet_names(data, name):
         raise ValueError(UNREADABLE)
@@ -464,7 +503,8 @@ def read_any(data: bytes, name: str, sheet=None, nrows=None) -> pd.DataFrame:
                 last = exc
         raise ValueError("Could not decode this CSV — try saving it as .xlsx") from last
     raw = pd.read_excel(io.BytesIO(data), sheet_name=sheet if sheet else 0,
-                        na_values=NA_STRINGS, header=None, nrows=nrows)
+                        na_values=NA_STRINGS, header=None, nrows=nrows,
+                        engine=_engine(name))
     if isinstance(raw, dict):
         raw = next(iter(raw.values()))
     return _apply_header(raw)
@@ -507,6 +547,22 @@ def _apply_header(raw: pd.DataFrame) -> pd.DataFrame:
     if raw.empty:
         return raw
     h = find_header(raw)
+    if raw.shape[1] > 40:
+        # Drop columns that have neither a heading nor a single value, before
+        # anything is named. A tracker sheet had a used range 16,384 columns
+        # wide from a few stray cells in the corner, and naming them all — then
+        # asking each one whether it was numeric — was most of the twenty
+        # seconds that file took. A *named* empty column stays: a question
+        # nobody answered is a finding about the form, not junk.
+        below = raw.iloc[h + 1:]
+        filled = below.notna().sum(axis=0).to_numpy()
+        # One value in a hundred rows is not a column. This sheet had a single
+        # pasted row of 16,377 links, which read as 16,377 columns each holding
+        # one value — and every per-column check downstream then ran on them.
+        floor = max(2, 0.05 * max(len(below), 1))
+        keep = raw.iloc[h].notna().to_numpy() | (filled >= floor)
+        if not keep.all():
+            raw = raw.loc[:, keep]
     frame = raw.iloc[h + 1:].reset_index(drop=True)
     row = _merge_header(raw, h)
     names, seen = [], {}
@@ -580,7 +636,19 @@ def prefix_of(name) -> str:
 
 def clean_label(name) -> str:
     """`hh/water_source_main` becomes `Water source main`. Kobo names are noise."""
-    s = strip_prefix(str(name)).split("/")[-1]
+    raw = str(name)
+    m = re.match(r"^Unnamed: (\d+)$", raw)
+    if m:
+        # The placeholder is pandas' internal name and reads as a fault. These
+        # columns are kept because one of them is often the row-label column of
+        # a wide table, so they do appear in chart titles — "by Column 2" is at
+        # least true, where "by Unnamed: 1" reads like a bug.
+        return f"Column {int(m.group(1)) + 1}"
+    # A numeric heading — the years across a wide table — must not go through
+    # the underscore/dot cleaning below, which turned 2015.0 into "2015 0".
+    if re.fullmatch(r"[-+]?\d+\.0+", raw.strip()):
+        return str(int(float(raw)))
+    s = strip_prefix(raw).split("/")[-1]
     s = re.sub(r"[_\.]+", " ", s).strip()
     s = re.sub(r"\s+", " ", s)
     if s.isupper() and len(s) > 4:
@@ -1032,8 +1100,8 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     that is the only time axis in the file, and it is what makes a trend
     possible at all.
     """
-    frames, skipped = {}, []
-    with pd.ExcelFile(io.BytesIO(data)) as xl:
+    frames, skipped, layout_of = {}, [], {}
+    with pd.ExcelFile(io.BytesIO(data), engine=_engine(name)) as xl:
         names = list(xl.sheet_names)
         for sh in names:
             try:
@@ -1043,11 +1111,21 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
                 skipped.append((sh, "could not be read"))
                 continue
             f = _apply_header(raw).dropna(axis=0, how="all")
-            real = [c for c in f.columns if not re.match(r"^Unnamed: \d+$", str(c))]
-            if len(f) == 0 or len(real) < 2:
+            named = [c for c in f.columns if not re.match(r"^Unnamed: \d+$", str(c))]
+            if len(f) == 0 or len(named) < 2:
                 skipped.append((sh, "no data rows"))
                 continue
-            frames[sh] = f[real]
+            # Named columns decide the layout — an unnamed one is a poor basis
+            # for saying two sheets match. An unnamed column is kept only when
+            # it is mostly filled, because then it is the row-label column of a
+            # wide table and this frame is handed straight back when there turns
+            # out to be nothing to combine. "Any data at all" was too loose: a
+            # tracker's stray corner cells became thousands of unnamed columns,
+            # and stacking thirteen sheets unioned them into 16,381.
+            keep = [c for c in f.columns
+                    if c in named or f[c].notna().mean() >= 0.5]
+            frames[sh] = f[keep]
+            layout_of[sh] = tuple(named)
 
     if not frames:
         return None, [], skipped
@@ -1060,7 +1138,10 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     import math
     rows_of, sheets_of = defaultdict(int), defaultdict(list)
     for sh, f in frames.items():
-        key = frozenset(f.columns)
+        # Keyed on the NAMED columns only. Two weeks of the same tracker match
+        # even if one has a stray unnamed column at the end, and an unnamed
+        # column is no basis for saying two layouts differ.
+        key = frozenset(layout_of[sh])
         rows_of[key] += len(f)
         sheets_of[key].append(sh)
 
@@ -1076,6 +1157,8 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
 
     modal_key = max(rows_of, key=lambda k: (table_score(len(k), rows_of[k]),
                                             len(sheets_of[k])))
+    # Widest first, on named columns: when two sheets hold the same records the
+    # one with more columns is the annotated version and the one to keep.
     modal = set(modal_key)
     # One sheet is not a combination. A report workbook of unrelated tables has
     # nothing to stack, and pretending otherwise hides the data behind a
@@ -1083,13 +1166,16 @@ def combine_sheets(data: bytes, name: str, min_overlap: float = 0.7):
     if len(sheets_of[modal_key]) < 2:
         biggest = max(frames, key=lambda sh: table_score(
             len(frames[sh].columns), len(frames[sh])))
-        return None, [], [("__fallback__", biggest)]
+        # Hand back the frame, not just the name: it is already parsed here, and
+        # re-reading it cost a second full pass over every sheet's XML — a fifth
+        # of the time on a 21-sheet workbook, for a sheet we were holding. An
+        # empty `used` list is what says "not a combination"; `skipped` keeps
+        # its two-tuple shape because callers unpack it.
+        return frames[biggest], [], [("__fallback__", biggest)]
     keep, out, seen_keys = [], [], []
-    # Candidate sheets, widest first: when two sheets hold the same records, the
-    # one with more columns is the annotated version and the one to keep.
-    ordered = sorted(frames.items(), key=lambda kv: -len(kv[1].columns))
+    ordered = sorted(frames.items(), key=lambda kv: -len(layout_of[kv[0]]))
     for sh, f in ordered:
-        overlap = len(modal & set(f.columns)) / max(len(modal), 1)
+        overlap = len(modal & set(layout_of[sh])) / max(len(modal), 1)
         if overlap < min_overlap:
             skipped.append((sh, f"different layout ({overlap:.0%} of the columns "
                                 "in common)"))
@@ -1142,6 +1228,11 @@ def looks_like_xlsform(sheets: list, columns) -> bool:
             for c in (list(columns) if columns is not None else [])}
     return {"type", "name"} <= cols and bool(cols & {"label", "hint",
                                                      "relevant", "appearance"})
+
+
+def is_unnamed(name) -> bool:
+    """True for the placeholder pandas gives a column with no heading."""
+    return bool(re.match(r"^Unnamed: \d+$", str(name)))
 
 
 def _numberish(v) -> bool:
@@ -1200,6 +1291,14 @@ def describe_shape(prof, sheets: list) -> str:
                 "layout, where the answer options are the columns and the real "
                 "heading sits above them in a merged cell. Pick a different "
                 "sheet, or reshape it to one row per record before uploading.")
+    nameless = [c for c in prof.columns.values() if is_unnamed(c.name)]
+    if len(nameless) >= 3 and len(nameless) >= 0.4 * len(prof.columns):
+        return (f"{len(nameless)} of {len(prof.columns)} columns have no "
+                "heading at all, which means the heading row was not found — "
+                "usually a title block, a merged banner, or a layout with the "
+                "labels down the side instead of across the top. Pick a "
+                "different sheet, or give the columns headings in one row "
+                "before uploading.")
     blank = [c for c in prof.columns.values() if c.role == EMPTY]
     if len(blank) >= max(4, 0.6 * len(prof.columns)):
         return (f"**{len(blank)} of {len(prof.columns)} columns are completely "
@@ -1253,9 +1352,10 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
     note = ""
     if sheet == ALL_SHEETS:
         joined, used, skipped = combine_sheets(data, name)
-        if joined is None and skipped and skipped[0][0] == "__fallback__":
+        if skipped and skipped[0][0] == "__fallback__":
             # Nothing to combine: show the sheet with the most data and say so,
             # rather than a union of whatever happened to share two columns.
+            # `joined` already holds that sheet, parsed.
             sheet = skipped[0][1]
             note = (f"The sheets have different layouts, so there is nothing to "
                     f"combine. Showing **{sheet}**, the one with the most data — "
@@ -1272,7 +1372,7 @@ def build(data: bytes, name: str, sheet=None, row_cap: int | None = None) -> Pro
     # dimension the file had — leaving years as columns and nothing to name.
     keep = [c for c in raw.columns
             if not re.match(r"^Unnamed: \d+$", str(c))
-            or raw[c].notna().any()]
+            or raw[c].notna().mean() >= 0.5]
     raw = raw[keep]
     truncated = 0
     if row_cap and len(raw) > row_cap:

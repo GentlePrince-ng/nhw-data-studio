@@ -189,7 +189,11 @@ def measures(prof: pf.Profile, limit: int = 6, overrides: dict | None = None
         agg, why = _agg_for(c.name, c.stats)
         if c.name in overrides and overrides[c.name] != agg:
             agg, why = overrides[c.name], "set by you on this page"
-        if pf.is_system(c.name):
+        if pf.is_system(c.name) or pf.is_unnamed(c.name):
+            # "Total unnamed: 6" is not a metric anybody asked for. A column
+            # with no heading can still hold the row labels of a wide table —
+            # that is why they are kept at all — but it cannot be a headline
+            # number, because nobody can say what it counts.
             continue
         out.append(Measure(c.name, c.short or c.label, agg, why,
                            bool(c.stats.get("integerish")), full=c.label))

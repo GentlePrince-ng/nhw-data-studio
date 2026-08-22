@@ -74,7 +74,12 @@ def _subset(key: str, data: bytes, name: str, sheet: str | None, sig: str,
 def sidebar_source():
     st.sidebar.markdown("#### Your data")
     up = st.sidebar.file_uploader(
-        "Excel or CSV", type=["xlsx", "xlsm", "csv", "tsv", "txt"],
+        "Excel or CSV",
+        # .xls only when calamine is installed; openpyxl cannot read it and the
+        # uploader accepting a file the reader then refuses is worse than not
+        # offering it.
+        type=(["xlsx", "xlsm", "csv", "tsv", "txt"]
+              + (["xls"] if pf._CALAMINE else [])),
         label_visibility="collapsed",
         help="Nothing is uploaded to a server or stored. The file stays in "
              "this browser session.")
@@ -615,7 +620,8 @@ this browser session and goes when you close the tab.
             st.markdown("**← Drop a file in the sidebar.**\n\nComfortable to a "
                         "few hundred thousand rows; the 10,000-row exports this "
                         "was built for are instant.")
-            st.markdown("Accepts `.xlsx`, `.xlsm`, `.csv`, `.tsv`. Multi-sheet "
+            st.markdown("Accepts `.xlsx`, `.xlsm`, `.csv`, `.tsv`"
+                        + (", `.xls`" if pf._CALAMINE else "") + ". Multi-sheet "
                         "workbooks let you pick the sheet.")
         with st.container(border=True):
             st.markdown("#### Maps")

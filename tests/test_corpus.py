@@ -54,6 +54,8 @@ DEFAULT_ROOTS = [
     Path.home() / "Downloads",
 ]
 SUFFIXES = {".csv", ".xlsx", ".xlsm", ".tsv"}
+if pf._CALAMINE:
+    SUFFIXES.add(".xls")            # readable only with the faster engine
 SLOW_SECONDS = 25.0
 
 

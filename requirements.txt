@@ -19,8 +19,16 @@ numpy>=1.26
 scipy>=1.11            # chi-square for the association findings
 
 # Reading uploads
-openpyxl>=3.1          # .xlsx / .xlsm
+openpyxl>=3.1          # .xlsx / .xlsm — the fallback reader, and still needed
 xlsxwriter>=3.1        # writing the Excel download
+# The reader that makes big workbooks bearable. openpyxl parses xlsx as XML in
+# Python: one 21-sheet workbook in the archive spent 20 of its 32 seconds in
+# there, and a 65,869-row export took 261s against a promise of five minutes.
+# calamine reads the same files 6-9x faster with identical results, and opens
+# the legacy .xls that openpyxl cannot. Optional by design — profiling.py falls
+# back to openpyxl if the import fails, so a failed wheel build is a slowdown
+# rather than an outage.
+python-calamine>=0.2,<1
 
 # Rendering charts to SVG/PNG for the offline HTML report. Pure-Rust wheel, no
 # system dependencies, no browser. Without it the app still runs and the report

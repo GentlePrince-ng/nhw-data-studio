@@ -311,8 +311,11 @@ def tracker_checks() -> None:
        pipe.rows <= n2, f"{pipe.rows} rows for {n2} records")
     joined2, used2, skipped2 = pf.combine_sheets(buf3.getvalue(), "p.xlsx")
     same = [why for sh, why in skipped2 if "same records" in why]
-    ck("the same-records overlap is named, not just skipped",
-       bool(same) or joined2 is None, str(skipped2)[:80])
+    # Either the duplicate is named as such, or no combination happened at all
+    # (an empty `used` list). What must never happen is the two sheets being
+    # stacked silently, which `pipe.rows <= n2` above is the guard for.
+    ck("the same-records overlap is named, or nothing was combined",
+       bool(same) or not used2, str(skipped2)[:80])
     one = pf.build(buf3.getvalue(), "p.xlsx", sheet="Raw+DqIssues")
     roles = {c.name: c.role for c in one.columns.values()}
     ck("a phone column is an identifier even when values repeat",
@@ -685,6 +688,100 @@ def main() -> int:
           f"sentence, not a traceback  ({why!r})")
     if not ok:
         fails.append("unopenable workbook raised the wrong way")
+
+    print("")
+    print("--- pathological sheets ---")
+    # One pasted row of links stretched a sheet's used range to 16,384 columns,
+    # each holding a single value. Naming them and asking each whether it was
+    # numeric was most of the forty seconds that file took to open.
+    body = ["SN,Content,Views"] + [f"{i},Post {i},{i * 7}" for i in range(1, 40)]
+    stray = "," * 400 + "https://example.org/pasted"
+    body.insert(20, "," + stray)
+    prof = pf.build(chr(10).join(body).encode(), "pasted.csv")
+    ok = len(prof.columns) <= 4 and prof.rows >= 39
+    print(f"  {'PASS' if ok else 'FAIL'}  a single pasted row does not become "
+          f"hundreds of columns  ({prof.rows} rows x {len(prof.columns)} cols)")
+    if not ok:
+        fails.append("phantom columns from one stray row")
+
+    # A named column that nobody filled in is the opposite case: it is a
+    # finding about the form and must survive.
+    wide = {"q1": ["Yes"] * 60, "q2": ["No"] * 60}
+    for i in range(3, 48):
+        wide[f"q{i}"] = [None] * 60
+    prof = pf.build(pd.DataFrame(wide).to_csv(index=False).encode(), "form.csv")
+    empties = [c.name for c in prof.columns.values() if c.role == pf.EMPTY]
+    ok = len(empties) == 45
+    print(f"  {'PASS' if ok else 'FAIL'}  named columns nobody filled in are "
+          f"still reported  ({len(empties)} of 45 kept)")
+    if not ok:
+        fails.append("named empty columns dropped")
+
+    # The fast reader is optional. Everything must work without it, because a
+    # failed wheel build on the host should be a slowdown, not an outage.
+    was = pf._CALAMINE
+    try:
+        for use in (True, False):
+            pf._CALAMINE = use
+            pf._SHEET_CACHE.clear()
+            buf = io.BytesIO()
+            frame = pd.DataFrame({"state": rng.choice(["Kano", "Lagos"], 40),
+                                  "cases": rng.integers(1, 40, 40)})
+            with pd.ExcelWriter(buf, engine="xlsxwriter") as xw:
+                frame.to_excel(xw, index=False, sheet_name="Data")
+            prof = pf.build(buf.getvalue(), "either.xlsx")
+            got = (prof.rows, len(prof.columns))
+            ok = got == (40, 2)
+            print(f"  {'PASS' if ok else 'FAIL'}  reads the same with "
+                  f"{'calamine' if use else 'openpyxl'}  {got}")
+            if not ok:
+                fails.append(f"engine mismatch: {'calamine' if use else 'openpyxl'}")
+    finally:
+        pf._CALAMINE = was
+        pf._SHEET_CACHE.clear()
+
+    # Two label rules for wide tables. "Unnamed: 1" is pandas' placeholder and
+    # reads as a fault in a chart title; and a year heading must not be put
+    # through the underscore cleaning, which turned 2015.0 into "2015 0".
+    wide2 = [",2015.0,2016.0,2017.0",
+             "Total population,186083442,192038112,198183332",
+             "Total funding,41200000,43800000,44100000",
+             "Gap,144883442,148238112,154083332"]
+    prof = pf.build(chr(10).join(wide2).encode(), "wide2.csv")
+    labels = [prof.label(c) for c in prof.columns]
+    titles = " ".join(q.title for q in charts.dashboard(prof, limit=4))
+    ok = ("Column 1" in labels and "2015" in labels
+          and "Unnamed" not in titles and "2015 0" not in titles)
+    print(f"  {'PASS' if ok else 'FAIL'}  a blank heading reads as its position "
+          f"and 2015.0 as '2015'  ({labels[:3]})")
+    if not ok:
+        fails.append("wide-table labels unreadable")
+
+    # ...and a column with no heading is never a headline number: nobody can
+    # say what "Total unnamed: 6" counts.
+    from app import metrics as _m
+    ms = [m.col for m in _m.measures(prof, limit=6)]
+    ok = not any(pf.is_unnamed(c) for c in ms)
+    print(f"  {'PASS' if ok else 'FAIL'}  an unnamed column is not offered as a "
+          f"measure  ({len(ms)} measures)")
+    if not ok:
+        fails.append("unnamed column offered as a measure")
+
+    # A sheet that is mostly headingless columns has lost its header row, and
+    # that is the finding.
+    lost = ["Report of activities,,,,,",
+            "Adamawa,NE,21,9.5,11.5,7",
+            "Bauchi,NE,18,8.5,10.0,6",
+            "Benue,NC,25,10.5,12.5,8",
+            "Kogi,NC,19,7.5,9.5,5",
+            "Kwara,NC,22,9.0,11.0,7"]
+    prof = pf.build(chr(10).join(lost).encode(), "lost.csv")
+    said = prof.shape_note or charts.why_nothing(prof)
+    ok = bool(said)
+    print(f"  {'PASS' if ok else 'FAIL'}  a sheet with no heading row is "
+          f"explained  ({said[:40]!r})")
+    if not ok:
+        fails.append("headingless sheet unexplained")
 
     print("\n--- size ---")
     n = 100_000
